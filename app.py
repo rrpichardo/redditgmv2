@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -68,6 +69,21 @@ PROVIDERS = {
         "model": "gpt-4o-mini",
     },
 }
+
+def _sanitize(obj: Any) -> Any:
+    """Recursively replace float NaN/inf/-inf with None so JSON.dumps never errors."""
+    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return None
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(v) for v in obj]
+    return obj
+
+
+def safe_json(data: Any) -> JSONResponse:
+    return JSONResponse(_sanitize(data))
+
 
 app = FastAPI(title="redditgm v2", version="2.0.0")
 app.mount("/static", StaticFiles(directory=WEB), name="static")
@@ -501,14 +517,14 @@ def get_run(
     min_score: float | None = None,
 ) -> JSONResponse:
     filters = request_filters(sentiment, vehicle, subreddit, severity, comment_type, competitor, search, min_score)
-    return JSONResponse(run_snapshot(tag, filters))
+    return safe_json(run_snapshot(tag, filters))
 
 
 @app.post("/api/upload")
 def upload_csv(tag: str = DEFAULT_TAG, file: UploadFile = File(...)) -> JSONResponse:
     df = read_upload(file)
     path = save_upload(tag, file, df)
-    return JSONResponse({"ok": True, "path": str(path), "kind": classify_upload_kind(df), "rows": len(df)})
+    return safe_json({"ok": True, "path": str(path), "kind": classify_upload_kind(df), "rows": len(df)})
 
 
 @app.post("/api/collect")
@@ -521,7 +537,7 @@ def collect_data(request: CollectRequest) -> JSONResponse:
     if active and active.get("process") and active["process"].poll() is None:
         payload = collect_status_payload(tag, active.get("job_id", ""))
         payload["started"] = False
-        return JSONResponse(payload)
+        return safe_json(payload)
 
     subreddits_file = source_subreddits_file(request.source, tag, request.subreddits)
 
@@ -603,12 +619,12 @@ def collect_data(request: CollectRequest) -> JSONResponse:
     }
     payload = collect_status_payload(tag, job_id)
     payload["started"] = True
-    return JSONResponse(payload)
+    return safe_json(payload)
 
 
 @app.get("/api/collect/status")
 def collect_status(tag: str = DEFAULT_TAG, job_id: str = "") -> JSONResponse:
-    return JSONResponse(collect_status_payload(tag, job_id))
+    return safe_json(collect_status_payload(tag, job_id))
 
 
 @app.post("/api/classify/preview")
@@ -620,7 +636,7 @@ def preview_classify(request: ClassifyRequest) -> JSONResponse:
         raise HTTPException(status_code=400, detail="No source data is loaded for this run.")
     classified = classify_preview(raw, limit=request.limit)
     path = save_classified(classified, classified_path(request.tag))
-    return JSONResponse({"ok": True, "path": str(path), "rows": len(classified)})
+    return safe_json({"ok": True, "path": str(path), "rows": len(classified)})
 
 
 @app.post("/api/classify/llm")
@@ -631,7 +647,7 @@ def llm_classify(request: LlmClassifyRequest) -> JSONResponse:
     pending = df[(~df["skip_classification"]) & (df["classifier_mode"].fillna("") == "")]
     work = pending.head(max(1, request.limit))
     if work.empty:
-        return JSONResponse({"ok": True, "rows": 0, "message": "No pending rows."})
+        return safe_json({"ok": True, "rows": 0, "message": "No pending rows."})
 
     provider = provider_config(request.provider, request.model, request.api_key)
     labels = []
@@ -641,7 +657,7 @@ def llm_classify(request: LlmClassifyRequest) -> JSONResponse:
         indices.append(idx)
     classified = apply_labels(df, labels, indices, mode="llm")
     path = save_classified(classified, classified_path(request.tag))
-    return JSONResponse({"ok": True, "path": str(path), "rows": len(labels)})
+    return safe_json({"ok": True, "path": str(path), "rows": len(labels)})
 
 
 @app.post("/api/briefing")
@@ -656,8 +672,11 @@ def briefing(request: BriefingRequest) -> JSONResponse:
         report = fallback_synthesis(payload)
     path = report_path(request.tag)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(report, encoding="utf-8")
-    return JSONResponse({"ok": True, "path": str(path), "report": report})
+    # Atomic write: temp file then replace so a partial write is never visible
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(report, encoding="utf-8")
+    os.replace(tmp, path)
+    return safe_json({"ok": True, "path": str(path), "report": report})
 
 
 @app.get("/api/download/classified")
@@ -710,7 +729,7 @@ def save_export(tag: str = DEFAULT_TAG, kind: str = "all") -> JSONResponse:
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     destination = downloads / f"{clean}_{label}_{timestamp}{suffix}"
     shutil.copy2(source, destination)
-    return JSONResponse({
+    return safe_json({
         "ok": True,
         "path": str(destination),
         "filename": destination.name,
