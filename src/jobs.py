@@ -63,7 +63,7 @@ def write_status(path: Path, fields: dict) -> None:
     # Load existing data so we can merge rather than overwrite the whole file
     existing: dict = {}
     try:
-        existing = json.loads(path.read_text())
+        existing = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         # Missing file, empty file, or corrupt JSON — start fresh
         pass
@@ -73,7 +73,7 @@ def write_status(path: Path, fields: dict) -> None:
 
     # Write to a sibling .tmp file first, then atomically rename
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(merged))
+    tmp.write_text(json.dumps(merged), encoding="utf-8")
     os.replace(tmp, path)  # atomic on POSIX; no partial writes visible to readers
 
 
@@ -84,7 +84,7 @@ def read_status(path: Path) -> dict | None:
     Otherwise returns the reconciled status dict (see `reconcile`).
     """
     try:
-        raw = path.read_text()
+        raw = path.read_text(encoding="utf-8")
         status = json.loads(raw)
     except Exception:
         # File missing or corrupt — callers treat this as "no info"
@@ -121,14 +121,15 @@ def reconcile(status: dict) -> dict:
             # Process doesn't exist or we don't have permission — treat as dead
             pid_alive = False
 
-    # Check whether the heartbeat is fresh enough
-    heartbeat_fresh = False
-    if heartbeat_at is not None:
-        elapsed = time.time() - float(heartbeat_at)
-        heartbeat_fresh = elapsed <= HEARTBEAT_STALE_SECS
+    # Check whether the heartbeat is stale — None means not yet written (grace period)
+    heartbeat_stale = (
+        heartbeat_at is not None
+        and (time.time() - float(heartbeat_at)) > HEARTBEAT_STALE_SECS
+    )
 
-    # Mark as interrupted only if the process is dead OR the heartbeat is stale
-    if not pid_alive or not heartbeat_fresh:
+    # Mark as interrupted only if the process is dead OR the heartbeat is stale.
+    # heartbeat_at=None is a grace period (job just spawned), not a stale signal.
+    if not pid_alive or heartbeat_stale:
         # Return a COPY — never mutate the caller's dict
         return {**status, "state": "interrupted", "updated_at": time.time()}
 

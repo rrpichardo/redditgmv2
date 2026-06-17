@@ -227,6 +227,12 @@ class TestReconcile:
         result = reconcile(status)
         assert result["state"] == "running"
 
+    def test_none_heartbeat_with_alive_pid_stays_running(self):
+        from src.jobs import reconcile
+        # Freshly-spawned job: PID alive but heartbeat not yet written
+        status = {"state": "running", "pid": os.getpid(), "heartbeat_at": None}
+        assert reconcile(status)["state"] == "running"
+
     def test_reconcile_does_not_mutate_input(self):
         # reconcile must return a new dict and leave the original untouched
         from src.jobs import reconcile
