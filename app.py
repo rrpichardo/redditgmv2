@@ -21,7 +21,9 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from src.charts import build_chart_payload, build_detail_data
 from src.gm_insights import (
+    MIN_CELL,
     ProviderConfig,
     all_complaint_mentions,
     apply_labels,
@@ -403,6 +405,7 @@ def run_snapshot(tag: str, filters: dict[str, Any] | None = None) -> dict[str, A
         "issue_severity": [],
     }
     if selected.empty:
+        # Legacy charts dict (used by existing frontend) — empty state.
         charts = {
             "sentiment": [],
             "flags": [],
@@ -416,8 +419,10 @@ def run_snapshot(tag: str, filters: dict[str, Any] | None = None) -> dict[str, A
             "cooccurrence": {},
         }
         evidence = []
+        chart_contract = build_chart_payload(pd.DataFrame())
     else:
         corr = cooccurrence(selected)
+        # Legacy charts dict — kept for backward compat while frontend migrates.
         charts = {
             "sentiment": dataframe_records(value_counts_df(selected, "sentiment", "sentiment")),
             "flags": dataframe_records(flag_summary(selected)),
@@ -427,10 +432,16 @@ def run_snapshot(tag: str, filters: dict[str, Any] | None = None) -> dict[str, A
             "vehicles": dataframe_records(vehicle_breakdown(selected, min_rows=1)),
             "severityByModel": dataframe_records(severity_by_model(selected, min_complaints=1)),
             "priority": dataframe_records(priority_matrix(selected, min_complaints=1)),
-            "competitors": dataframe_records(value_counts_df(selected[selected["competitor_mention"] == 1], "competitor_brand", "brand") if "competitor_mention" in selected else pd.DataFrame()),
+            "competitors": dataframe_records(
+                value_counts_df(
+                    selected[selected["competitor_mention"] == 1], "competitor_brand", "brand"
+                ) if "competitor_mention" in selected else pd.DataFrame()
+            ),
             "cooccurrence": corr.where(pd.notna(corr), 0).to_dict() if not corr.empty else {},
         }
         evidence = dataframe_records(evidence_table(selected, limit=200), limit=200)
+        # New Phase 1 chart contract: chart_specs + chart_data.
+        chart_contract = build_chart_payload(selected)
     return {
         "tag": clean_tag(tag),
         "paths": {
@@ -449,6 +460,9 @@ def run_snapshot(tag: str, filters: dict[str, Any] | None = None) -> dict[str, A
         },
         "summary": payload,
         "charts": charts,
+        # Phase 1 chart contract — browser and export renderers should prefer these.
+        "chart_specs": chart_contract["chart_specs"],
+        "chart_data": chart_contract["chart_data"],
         "evidence": evidence,
         "filterOptions": filter_options(df),
     }
@@ -518,6 +532,26 @@ def get_run(
 ) -> JSONResponse:
     filters = request_filters(sentiment, vehicle, subreddit, severity, comment_type, competitor, search, min_score)
     return safe_json(run_snapshot(tag, filters))
+
+
+@app.get("/api/charts/detail")
+def charts_detail(
+    tag: str = DEFAULT_TAG,
+    sentiment: list[str] | None = Query(default=None),
+    vehicle: list[str] | None = Query(default=None),
+    subreddit: list[str] | None = Query(default=None),
+    severity: list[str] | None = Query(default=None),
+    comment_type: list[str] | None = Query(default=None),
+    competitor: list[str] | None = Query(default=None),
+    search: str = "",
+    min_score: float | None = None,
+) -> JSONResponse:
+    """Serve lazy chart data (category_by_model heatmap and flag co-occurrence).
+    Accepts the same filter params as /api/run so the browser can pass them through."""
+    df = load_frame(tag)
+    filters = request_filters(sentiment, vehicle, subreddit, severity, comment_type, competitor, search, min_score)
+    selected = filter_analyzed(df, filters) if not df.empty else pd.DataFrame()
+    return JSONResponse(build_detail_data(selected))
 
 
 @app.post("/api/upload")

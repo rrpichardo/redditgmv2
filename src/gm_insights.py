@@ -124,6 +124,11 @@ COMPETITOR_ALIASES = {
     "jeep": ["jeep", "wrangler", "grand cherokee"],
 }
 
+# Minimum cell count for noisy model/category detail charts.
+# Charts that cross-tab vehicles × categories suppress cells below this threshold
+# to prevent misleading rates from tiny samples.
+MIN_CELL = 5
+
 CLASSIFICATION_SYSTEM_PROMPT = """
 You are an expert automotive consumer insights analyst working for General Motors.
 You will receive one Reddit comment with the original post as context. The original
@@ -597,11 +602,11 @@ def analyzed_frame(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     out = ensure_label_columns(df)
-    # Exclude junk rows that were never meant to be classified
-    if "skip_classification" in out:
+    # Exclude junk rows that were never eligible for classification.
+    if "skip_classification" in out.columns:
         out = out[~out["skip_classification"].astype(bool)]
-    # Exclude rows without any classifier output
-    if "classifier_mode" in out:
+    # Keep only rows that actually went through a classifier.
+    if "classifier_mode" in out.columns:
         out = out[out["classifier_mode"].fillna("").astype(str).str.len() > 0]
     # Exclude sentinel values written when classification was skipped or errored
     out = out[~out["sentiment"].isin(["skipped", "error", ""])].copy()
@@ -785,6 +790,156 @@ def cooccurrence(df: pd.DataFrame) -> pd.DataFrame:
     if analyzed.empty:
         return pd.DataFrame()
     return analyzed[BINARY_FLAGS].astype(int).corr().round(2)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 notebook-parity aggregations
+# ---------------------------------------------------------------------------
+
+def engagement_breakdown(df: pd.DataFrame) -> pd.DataFrame:
+    """Distribution of engagement levels (low / medium / high) across analyzed rows."""
+    analyzed = analyzed_frame(df)
+    return value_counts_df(analyzed, "engagement_level", "level")
+
+
+def comment_type_dist(df: pd.DataFrame) -> pd.DataFrame:
+    """Distribution of comment types (complaint, question, praise, etc.)."""
+    analyzed = analyzed_frame(df)
+    return value_counts_df(analyzed, "comment_type", "comment_type")
+
+
+def subreddit_breakdown(df: pd.DataFrame, min_rows: int = MIN_CELL) -> pd.DataFrame:
+    """Per-subreddit complaint rate and negative sentiment.
+    Subreddits with fewer than min_rows analyzed rows are excluded."""
+    analyzed = analyzed_frame(df)
+    if analyzed.empty or "subreddit_norm" not in analyzed.columns:
+        return pd.DataFrame()
+    grouped = analyzed.groupby("subreddit_norm").agg(
+        comment_count=("subreddit_norm", "count"),
+        complaint_rate_pct=("complaint", lambda x: round(x.mean() * 100, 1)),
+        negative_pct=("sentiment", lambda x: round((x == "negative").mean() * 100, 1)),
+    )
+    return (
+        grouped[grouped["comment_count"] >= min_rows]
+        .sort_values("comment_count", ascending=False)
+        .reset_index()
+    )
+
+
+def complaint_by_model_table(df: pd.DataFrame, min_cell: int = MIN_CELL) -> list[dict[str, Any]]:
+    """Complaint category × vehicle pivot.
+    Vehicles with fewer than min_cell total complaints are dropped.
+    Individual cells below min_cell are zeroed so noisy rates don't mislead.
+    Returns list of dicts keyed by vehicle + category columns (stacked-bar ready)."""
+    analyzed = analyzed_frame(df)
+    complaints = analyzed[analyzed["complaint"] == 1]
+    if complaints.empty:
+        return []
+    pivot = (
+        complaints
+        .groupby(["vehicle_mentioned", "top_complaint_category"])
+        .size()
+        .unstack(fill_value=0)
+    )
+    row_totals = pivot.sum(axis=1)
+    pivot = pivot[row_totals >= min_cell]
+    if pivot.empty:
+        return []
+    # Suppress individual cells below min_cell.
+    pivot = pivot.where(pivot >= min_cell, other=0)
+    return (
+        pivot
+        .reset_index()
+        .rename(columns={"vehicle_mentioned": "vehicle"})
+        .to_dict(orient="records")
+    )
+
+
+def sentiment_by_model_table(df: pd.DataFrame, min_cell: int = MIN_CELL) -> list[dict[str, Any]]:
+    """Sentiment × vehicle pivot for 100% stacked bar rendering.
+    Vehicles with fewer than min_cell analyzed rows are excluded."""
+    analyzed = analyzed_frame(df)
+    if analyzed.empty:
+        return []
+    pivot = (
+        analyzed
+        .groupby(["vehicle_mentioned", "sentiment"])
+        .size()
+        .unstack(fill_value=0)
+    )
+    row_totals = pivot.sum(axis=1)
+    pivot = pivot[row_totals >= min_cell]
+    if pivot.empty:
+        return []
+    return (
+        pivot
+        .reset_index()
+        .rename(columns={"vehicle_mentioned": "vehicle"})
+        .to_dict(orient="records")
+    )
+
+
+def category_heatmap(df: pd.DataFrame, min_cell: int = MIN_CELL) -> dict[str, Any]:
+    """Category-by-model heatmap matrix (lazy — served from /api/charts/detail).
+    Rows = vehicles, columns = complaint categories.
+    Cells below min_cell become None (null in JSON) so the renderer can grey them out."""
+    analyzed = analyzed_frame(df)
+    complaints = analyzed[analyzed["complaint"] == 1]
+    if complaints.empty:
+        return {"rows": [], "columns": [], "values": []}
+    pivot = (
+        complaints
+        .groupby(["vehicle_mentioned", "top_complaint_category"])
+        .size()
+        .unstack(fill_value=0)
+    )
+    # Drop rows (vehicles) with too few total complaints.
+    pivot = pivot[pivot.sum(axis=1) >= min_cell]
+    # Drop columns (categories) with too few total complaints.
+    col_totals = pivot.sum(axis=0)
+    pivot = pivot[col_totals[col_totals >= min_cell].index]
+    if pivot.empty:
+        return {"rows": [], "columns": [], "values": []}
+    masked = pivot.where(pivot >= min_cell, other=None).astype(object)
+    return {
+        "rows": pivot.index.tolist(),
+        "columns": pivot.columns.tolist(),
+        "values": masked.values.tolist(),
+    }
+
+
+def engagement_weighted_themes(df: pd.DataFrame, min_rows: int = 3) -> pd.DataFrame:
+    """Complaint themes ranked by sum of Reddit scores (engagement-weighted volume).
+    Themes with fewer than min_rows complaints are excluded."""
+    analyzed = analyzed_frame(df)
+    complaints = analyzed[analyzed["complaint"] == 1]
+    if complaints.empty:
+        return pd.DataFrame(columns=["theme", "weighted_score", "count"])
+    grouped = complaints.groupby("top_complaint_category").agg(
+        count=("top_complaint_category", "count"),
+        weighted_score=("score_norm", lambda x: round(float(x.sum()), 1)),
+    )
+    return (
+        grouped[grouped["count"] >= min_rows]
+        .sort_values("weighted_score", ascending=False)
+        .reset_index(names="theme")
+    )
+
+
+def competitor_breakdown_detail(df: pd.DataFrame) -> pd.DataFrame:
+    """Per-competitor volume, complaint rate, and negative sentiment share."""
+    analyzed = analyzed_frame(df)
+    if analyzed.empty:
+        return pd.DataFrame()
+    mentioned = analyzed[analyzed["competitor_mention"] == 1]
+    if mentioned.empty or "competitor_brand" not in mentioned.columns:
+        return pd.DataFrame()
+    grouped = mentioned.groupby("competitor_brand").agg(
+        count=("competitor_brand", "count"),
+        complaint_rate_pct=("complaint", lambda x: round(x.mean() * 100, 1)),
+        negative_pct=("sentiment", lambda x: round((x == "negative").mean() * 100, 1)),
+    )
+    return grouped.sort_values("count", ascending=False).reset_index()
 
 
 def evidence_table(df: pd.DataFrame, limit: int = 200) -> pd.DataFrame:
