@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>redditgm v2</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to main content</a>
+    <div class="app-shell">
+      <aside class="rail" aria-label="Workspace controls">
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <div>
+            <strong>redditgm v2</strong>
+            <span>Signal operations</span>
+          </div>
+        </div>
+
+        <div class="rail-section">
+          <label for="tagInput">Run tag</label>
+          <input id="tagInput" value="gm_vehicle_on_demand" autocomplete="off" />
+        </div>
+
+        <div class="rail-section">
+          <label for="providerSelect">LLM provider</label>
+          <select id="providerSelect">
+            <option value="openrouter">OpenRouter</option>
+            <option value="openai">OpenAI</option>
+          </select>
+
+          <label for="modelInput">Model</label>
+          <input id="modelInput" value="gpt-oss-120b" autocomplete="off" />
+
+          <label for="apiKeyInput">API key override</label>
+          <input id="apiKeyInput" type="password" autocomplete="off" />
+        </div>
+
+        <div class="rail-stack" aria-label="Run telemetry">
+          <div class="rail-meta">
+            <span>Server</span>
+            <strong>FastAPI</strong>
+          </div>
+          <div class="rail-meta">
+            <span>Collector</span>
+            <strong id="collectorStatus">checking</strong>
+          </div>
+          <div class="rail-meta">
+            <span>Rows</span>
+            <strong id="railRows">loading</strong>
+          </div>
+          <div class="rail-meta">
+            <span>Exports</span>
+            <strong id="railExports">checking</strong>
+          </div>
+        </div>
+      </aside>
+
+      <main id="main" class="main">
+        <section class="topband">
+          <div>
+            <span class="eyebrow">Live Reddit intake</span>
+            <h1>GM Signal Desk</h1>
+            <p id="runSubtitle">Run status is loading.</p>
+          </div>
+          <div class="top-actions">
+            <button id="refreshBtn" class="icon-button" aria-label="Refresh run">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/></svg>
+            </button>
+            <button id="saveZipBtn" class="button primary" type="button" disabled data-save-kind="all">Save ZIP</button>
+            <a id="sourceZipDownload" class="button primary" href="#" aria-disabled="true" data-save-kind="all">All data ZIP</a>
+            <a id="combinedDownload" class="button secondary" href="#" aria-disabled="true" data-save-kind="combined">Posts + comments</a>
+            <a id="classifiedDownload" class="button secondary" href="#" aria-disabled="true" data-save-kind="classified">Classified CSV</a>
+            <a id="reportDownload" class="button secondary" href="#" aria-disabled="true" data-save-kind="report">Briefing MD</a>
+          </div>
+        </section>
+
+        <nav class="tabs" aria-label="Primary">
+          <button class="tab is-active" data-view="dashboard">Dashboard</button>
+          <button class="tab" data-view="collect">Collect</button>
+          <button class="tab" data-view="classify">Classify</button>
+          <button class="tab" data-view="explore">Explore</button>
+          <button class="tab" data-view="briefing">Briefing</button>
+        </nav>
+
+        <section id="statusBar" class="status-bar" aria-live="polite"></section>
+        <section id="viewRoot"></section>
+      </main>
+    </div>
+
+    <template id="emptyTemplate">
+      <div class="empty-state">
+        <h2>No run data yet</h2>
+        <p>Collect Reddit data or upload a collector CSV to activate the analysis workspace.</p>
+        <button class="button primary" data-jump="collect">Open collection</button>
+      </div>
+    </template>
+
+    <script src="/static/app.js" type="module"></script>
+  </body>
+</html>
