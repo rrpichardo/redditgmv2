@@ -69,6 +69,15 @@ def _make_row(**kwargs) -> dict:
     return defaults
 
 
+from src.gm_insights import ProviderConfig
+
+# Fake provider for tests where classify_with_llm is mocked — content doesn't matter
+_FAKE_PROVIDER = ProviderConfig(
+    provider="openrouter", model="test-model",
+    base_url="https://example.com", api_key_env="TEST_KEY", api_key="fake-key",
+)
+
+
 def _fake_label() -> dict:
     """Minimal valid LLM label dict for mocking classify_with_llm."""
     return {
@@ -437,6 +446,7 @@ class TestClassifyJobRun:
                 runtime_root=runtime_root,
                 tag=tag,
                 job_id=job_id,
+                provider=_FAKE_PROVIDER,
             )
 
         from src.gm_insights import load_classified
@@ -466,6 +476,7 @@ class TestClassifyJobRun:
                 runtime_root=runtime_root,
                 tag=tag,
                 job_id=job_id,
+                provider=_FAKE_PROVIDER,
             )
 
         status = read_status(job_path(runtime_root, tag, job_id))
@@ -493,6 +504,7 @@ class TestClassifyJobRun:
                 runtime_root=runtime_root,
                 tag=tag,
                 job_id=job_id,
+                provider=_FAKE_PROVIDER,
             )
 
         from src.gm_insights import load_classified
@@ -528,6 +540,7 @@ class TestClassifyJobRun:
                 tag=tag,
                 job_id=job_id,
                 limit=2,
+                provider=_FAKE_PROVIDER,
             )
 
         assert call_count["n"] == 2
@@ -551,6 +564,7 @@ class TestClassifyJobRun:
                 runtime_root=runtime_root,
                 tag=tag,
                 job_id=job_id,
+                provider=_FAKE_PROVIDER,
             )
             # LLM called exactly once (for norm1, not skip1)
             assert mock_llm.call_count == 1

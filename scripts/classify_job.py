@@ -16,13 +16,14 @@ import argparse
 import time
 
 # Module-level imports so patch("scripts.classify_job.classify_with_llm") works in tests
+import pandas as pd
+
 from src.gm_insights import (
     classify_with_llm,
     complete_label,
     save_classified,
     ensure_label_columns,
     ProviderConfig,
-    _read_csv,
 )
 from src.jobs import job_path, write_status
 
@@ -35,7 +36,7 @@ def run_classify_job(
     job_id: str,
     runtime_root: Path,
     classified_path: Path,
-    provider: ProviderConfig | None = None,
+    provider: ProviderConfig,
     limit: int = 0,
 ) -> None:
     """Classify all pending rows in classified_path and write status updates.
@@ -57,7 +58,7 @@ def run_classify_job(
         # Use _read_csv + ensure_label_columns instead of load_classified so
         # that rows with classifier_mode="" stay "" (load_classified goes
         # through normalize_reddit_frame which upgrades "" to "imported").
-        df = ensure_label_columns(_read_csv(classified_path))
+        df = ensure_label_columns(pd.read_csv(classified_path, dtype=str, keep_default_na=False))
 
         # skip_classification may be stored as the string "True"/"False" in CSV
         skip_col = df["skip_classification"].astype(str).str.lower()
