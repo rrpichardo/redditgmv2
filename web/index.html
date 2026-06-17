@@ -10,69 +10,75 @@
     <a class="skip-link" href="#main">Skip to main content</a>
     <div class="app-shell">
       <aside class="rail" aria-label="Workspace controls">
-        <div class="brand-lockup">
-          <span class="brand-mark" aria-hidden="true"></span>
-          <div>
-            <strong>redditgm v2</strong>
-            <span>Signal operations</span>
+        <div class="rail-inner">
+          <div class="brand-lockup">
+            <span class="brand-mark" aria-hidden="true"></span>
+            <div>
+              <strong>redditgm v2</strong>
+              <span class="brand-tagline">Signal operations</span>
+            </div>
           </div>
-        </div>
 
-        <div class="rail-section">
-          <label for="tagInput">Run tag</label>
-          <input id="tagInput" value="gm_vehicle_on_demand" autocomplete="off" />
-        </div>
-
-        <div class="rail-section">
-          <label for="providerSelect">LLM provider</label>
-          <select id="providerSelect">
-            <option value="openrouter">OpenRouter</option>
-            <option value="openai">OpenAI</option>
-          </select>
-
-          <label for="modelInput">Model</label>
-          <input id="modelInput" value="gpt-oss-120b" autocomplete="off" />
-
-          <label for="apiKeyInput">API key override</label>
-          <input id="apiKeyInput" type="password" autocomplete="off" />
-        </div>
-
-        <div class="rail-stack" aria-label="Run telemetry">
-          <div class="rail-meta">
-            <span>Server</span>
-            <strong>FastAPI</strong>
+          <div class="rail-section">
+            <label for="tagInput">Run tag</label>
+            <input id="tagInput" value="gm_vehicle_on_demand" autocomplete="off" />
           </div>
-          <div class="rail-meta">
-            <span>Collector</span>
-            <strong id="collectorStatus">checking</strong>
+
+          <div class="rail-section">
+            <label for="providerSelect">LLM provider</label>
+            <select id="providerSelect">
+              <option value="openrouter">OpenRouter</option>
+              <option value="openai">OpenAI</option>
+            </select>
+
+            <label for="modelInput">Model</label>
+            <input id="modelInput" value="gpt-oss-120b" autocomplete="off" />
+
+            <label for="apiKeyInput">API key override</label>
+            <input id="apiKeyInput" type="password" autocomplete="off" />
           </div>
-          <div class="rail-meta">
-            <span>Rows</span>
-            <strong id="railRows">loading</strong>
-          </div>
-          <div class="rail-meta">
-            <span>Exports</span>
-            <strong id="railExports">checking</strong>
+
+          <div class="rail-stack" aria-label="Run telemetry">
+            <div class="rail-meta">
+              <span>Server</span>
+              <strong>FastAPI</strong>
+            </div>
+            <div class="rail-meta">
+              <span>Collector</span>
+              <strong id="collectorStatus">checking</strong>
+            </div>
+            <div class="rail-meta">
+              <span>Rows</span>
+              <strong id="railRows">loading</strong>
+            </div>
+            <div class="rail-meta">
+              <span>Exports</span>
+              <strong id="railExports">checking</strong>
+            </div>
           </div>
         </div>
       </aside>
 
       <main id="main" class="main">
         <section class="topband">
-          <div>
+          <div class="topband-title">
             <span class="eyebrow">Live Reddit intake</span>
             <h1>GM Signal Desk</h1>
             <p id="runSubtitle">Run status is loading.</p>
           </div>
-          <div class="top-actions">
-            <button id="refreshBtn" class="icon-button" aria-label="Refresh run">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/></svg>
-            </button>
-            <button id="saveZipBtn" class="button primary" type="button" disabled data-save-kind="all">Save ZIP</button>
-            <a id="sourceZipDownload" class="button primary" href="#" aria-disabled="true" data-save-kind="all">All data ZIP</a>
-            <a id="combinedDownload" class="button secondary" href="#" aria-disabled="true" data-save-kind="combined">Posts + comments</a>
-            <a id="classifiedDownload" class="button secondary" href="#" aria-disabled="true" data-save-kind="classified">Classified CSV</a>
-            <a id="reportDownload" class="button secondary" href="#" aria-disabled="true" data-save-kind="report">Briefing MD</a>
+          <div class="topband-actions top-actions">
+            <div class="topband-primary">
+              <button id="refreshBtn" class="icon-button" aria-label="Refresh run">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/></svg>
+              </button>
+              <button id="saveZipBtn" class="button primary" type="button" disabled data-save-kind="all">Save ZIP</button>
+            </div>
+            <div class="topband-exports">
+              <a id="sourceZipDownload" class="export-chip" href="#" aria-disabled="true" data-save-kind="all">All data ZIP</a>
+              <a id="combinedDownload" class="export-chip" href="#" aria-disabled="true" data-save-kind="combined">Posts + comments</a>
+              <a id="classifiedDownload" class="export-chip" href="#" aria-disabled="true" data-save-kind="classified">Classified CSV</a>
+              <a id="reportDownload" class="export-chip" href="#" aria-disabled="true" data-save-kind="report">Briefing MD</a>
+            </div>
           </div>
         </section>
 
@@ -91,6 +97,14 @@
 
     <template id="emptyTemplate">
       <div class="empty-state">
+        <div class="empty-icon" aria-hidden="true">
+          <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="6" y="10" width="36" height="28" rx="4" stroke="currentColor" stroke-width="2.5"/>
+            <path d="M16 22h16M16 28h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <circle cx="38" cy="10" r="7" fill="var(--amber)" stroke="var(--surface)" stroke-width="2"/>
+            <path d="M38 7v4M38 13v.5" stroke="white" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </div>
         <h2>No run data yet</h2>
         <p>Collect Reddit data or upload a collector CSV to activate the analysis workspace.</p>
         <button class="button primary" data-jump="collect">Open collection</button>
