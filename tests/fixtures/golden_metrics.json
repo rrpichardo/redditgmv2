@@ -1,0 +1,10 @@
+{
+  "total_rows": 7,
+  "analyzed_rows": 3,
+  "skipped_rows": 2,
+  "complaints": 1,
+  "complaint_rate": 33.3,
+  "negative_rate": 33.3,
+  "competitor_rate": 33.3,
+  "ev_rate": 0.0
+}

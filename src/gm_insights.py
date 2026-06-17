@@ -582,7 +582,10 @@ def save_classified(df: pd.DataFrame, path: Path) -> Path:
     out = df.copy()
     if "created_at_norm" in out:
         out["created_at_norm"] = pd.to_datetime(out["created_at_norm"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
-    out.to_csv(path, index=False)
+    # Write to a temp file then atomically replace so readers never see a partial CSV
+    tmp = path.with_suffix(".tmp")
+    out.to_csv(tmp, index=False)
+    os.replace(tmp, path)
     return path
 
 
@@ -591,9 +594,16 @@ def load_classified(path: Path) -> pd.DataFrame:
 
 
 def analyzed_frame(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
     out = ensure_label_columns(df)
+    # Exclude junk rows that were never meant to be classified
+    if "skip_classification" in out:
+        out = out[~out["skip_classification"].astype(bool)]
+    # Exclude rows without any classifier output
     if "classifier_mode" in out:
         out = out[out["classifier_mode"].fillna("").astype(str).str.len() > 0]
+    # Exclude sentinel values written when classification was skipped or errored
     out = out[~out["sentiment"].isin(["skipped", "error", ""])].copy()
     out["created_at_norm"] = pd.to_datetime(out["created_at_norm"], errors="coerce")
     out["score_norm"] = pd.to_numeric(out["score_norm"], errors="coerce").fillna(0)
