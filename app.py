@@ -22,6 +22,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from src.charts import build_chart_payload, build_detail_data
+# Bare import so test mocks (patch "app.start_job", "app.find_active_job") resolve correctly
+from src.jobs import find_active_job, job_path, read_status, start_job
 from src.gm_insights import (
     MIN_CELL,
     ProviderConfig,
@@ -120,6 +122,19 @@ class BriefingRequest(BaseModel):
     model: str = ""
     api_key: str = ""
     use_llm: bool = False
+
+
+class ClassifyJobRequest(BaseModel):
+    tag: str = DEFAULT_TAG
+    provider: str = "openrouter"
+    model: str = ""
+    api_key: str = ""
+    limit: int = 0  # 0 = all pending rows
+
+
+class PdfExportJobRequest(BaseModel):
+    tag: str = DEFAULT_TAG
+    kind: str = "charts"  # "charts" | "briefing"
 
 
 def run_dir(tag: str) -> Path:
@@ -711,6 +726,98 @@ def briefing(request: BriefingRequest) -> JSONResponse:
     tmp.write_text(report, encoding="utf-8")
     os.replace(tmp, path)
     return safe_json({"ok": True, "path": str(path), "report": report})
+
+
+@app.post("/api/classify/job")
+def classify_job(request: ClassifyJobRequest) -> JSONResponse:
+    """Start a full-run LLM classify subprocess. Returns existing job if one is running."""
+    tag = clean_tag(request.tag)
+    # Check for an already-running job first — active job takes priority over CSV check
+    active = find_active_job(RUNTIME, tag, "classify")
+    if active:
+        return safe_json({**active, "started": False})
+    cpath = classified_path(tag)
+    if not cpath.exists():
+        raise HTTPException(
+            status_code=400,
+            detail="No classified CSV found for this tag. Run preview classification first.",
+        )
+    pcfg = provider_config(request.provider, request.model, request.api_key)
+    # API key goes in env, never on the command line
+    env: dict[str, str] = {}
+    if request.api_key:
+        env[pcfg.api_key_env] = request.api_key
+    extra_args = [
+        "--classified_path", str(cpath),
+        "--provider", pcfg.provider,
+        "--base_url", pcfg.base_url,
+        "--model", pcfg.model,
+        "--api_key_env", pcfg.api_key_env,
+        "--limit", str(max(0, request.limit)),
+    ]
+    status = start_job(
+        RUNTIME, tag, "classify",
+        ROOT / "scripts" / "classify_job.py",
+        extra_args,
+        env=env,
+        cwd=ROOT,
+    )
+    return safe_json({**status, "started": True})
+
+
+@app.get("/api/classify/status")
+def classify_status(tag: str = DEFAULT_TAG, job_id: str = "") -> JSONResponse:
+    """Return the most recent classify job status. Reconciles dead PIDs on read."""
+    tag = clean_tag(tag)
+    if job_id:
+        # Specific job requested — look it up by ID
+        status = read_status(job_path(RUNTIME, tag, job_id))
+    else:
+        # No job_id: try active job first, then fall back to most recent finished job
+        status = find_active_job(RUNTIME, tag, "classify")
+        if not status:
+            d = RUNTIME / tag / "jobs"
+            if d.exists():
+                all_jobs = []
+                for p in d.glob("*.json"):
+                    s = read_status(p)
+                    if s and s.get("kind") == "classify":
+                        all_jobs.append(s)
+                if all_jobs:
+                    status = max(all_jobs, key=lambda s: float(s.get("started_at", 0)))
+    if not status:
+        return safe_json({"state": "idle", "tag": tag})
+    return safe_json(status)
+
+
+@app.post("/api/export/pdf-job")
+def pdf_export_job(request: PdfExportJobRequest) -> JSONResponse:
+    """Start a PDF export subprocess job (stub — Phase 3 fills real rendering)."""
+    tag = clean_tag(request.tag)
+    active = find_active_job(RUNTIME, tag, "pdf_export")
+    if active:
+        return safe_json({**active, "started": False})
+    extra_args = ["--kind", request.kind]
+    status = start_job(
+        RUNTIME, tag, "pdf_export",
+        ROOT / "scripts" / "pdf_export_job.py",
+        extra_args,
+        cwd=ROOT,
+    )
+    return safe_json({**status, "started": True})
+
+
+@app.get("/api/export/status")
+def pdf_export_status(tag: str = DEFAULT_TAG, job_id: str = "") -> JSONResponse:
+    """Return the most recent pdf_export job status."""
+    tag = clean_tag(tag)
+    if job_id:
+        status = read_status(job_path(RUNTIME, tag, job_id))
+    else:
+        status = find_active_job(RUNTIME, tag, "pdf_export")
+    if not status:
+        return safe_json({"state": "idle", "tag": tag})
+    return safe_json(status)
 
 
 @app.get("/api/download/classified")
