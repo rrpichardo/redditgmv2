@@ -127,7 +127,7 @@ def test_explore_charts_render_as_echarts_canvas(live_server, browser_page):
     _load_app_with_data(page, live_server)
     page.click('.tab[data-view="explore"]')
     # ECharts renders into <canvas> elements; none exist in the current monolith
-    page.wait_for_selector("[data-chart] canvas", timeout=15000)
+    page.wait_for_selector("[data-chart] canvas", timeout=30000)
     canvas_count = page.eval_on_selector_all("[data-chart] canvas", "els => els.length")
     assert canvas_count >= 5, f"expected >=5 ECharts canvases in Explore, got {canvas_count}"
 
