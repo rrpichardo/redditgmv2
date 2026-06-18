@@ -88,3 +88,18 @@ def test_render_into_draws_canvas_and_disposes(live_server, browser_page):
     )
     assert result["drawn"], "renderChartInto must create a canvas"
     assert result["cleared"], "disposeChart must remove the canvas"
+
+
+def test_design_tokens_defined(live_server, browser_page):
+    page = browser_page
+    page.goto(live_server.url)
+    required = ["--status-failed", "--status-running", "--status-done", "--data-negative", "--radius-lg"]
+    for token in required:
+        value = page.evaluate(
+            "t => getComputedStyle(document.documentElement).getPropertyValue(t).trim()", token
+        )
+        assert value, f"design token {token} is not defined"
+    # Architecture-review invariant: failed != data-negative (separate hue lanes)
+    failed = page.evaluate("() => getComputedStyle(document.documentElement).getPropertyValue('--status-failed').trim()")
+    negative = page.evaluate("() => getComputedStyle(document.documentElement).getPropertyValue('--data-negative').trim()")
+    assert failed != negative, "system 'failed' must not reuse the data-negative red"
