@@ -503,3 +503,176 @@ def build_briefing_pdf(
     pdf.output(str(tmp))
     os.replace(tmp, pdf_path)
     return pdf_path
+
+
+# ---------------------------------------------------------------------------
+# Trend briefing PDF (Phase 5)
+# ---------------------------------------------------------------------------
+
+_CONFIDENCE_EMOJI = {"high": "✓", "medium": "~", "low": "!"}
+_DIRECTION_LABEL = {
+    "rising": "Rising",
+    "falling": "Falling",
+    "stable": "Stable",
+    "insufficient_data": "Insufficient data",
+}
+
+
+def build_trend_briefing_pdf(
+    labels: dict[str, Any],
+    examples: dict[str, Any],
+    signals: dict[str, Any],
+    pdf_path: Path,
+) -> Path:
+    """Write a trend briefing PDF: cover page + one page per cluster with signals.
+
+    labels  — cluster_labels.json content  {cid_str: label dict}
+    examples — cluster_examples.json content {cid_str: context dict}
+    signals — trend_signals.json content (may be {} if trend analysis not run)
+    pdf_path — output file path (written atomically)
+    """
+    if not _HAS_FPDF:
+        raise ImportError("fpdf2 is required. pip install fpdf2")
+
+    pdf = FPDF(orientation="L", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=12)
+    pdf.set_margins(14, 12, 14)
+
+    cluster_signals: dict[str, Any] = signals.get("signals", {})
+    data_span = signals.get("data_span_days", 0)
+    has_timestamps = signals.get("has_timestamps", False)
+    computed_at = signals.get("computed_at")
+
+    # Sort clusters by rising-first, then falling, then stable, then no-data
+    _dir_order = {"rising": 0, "falling": 1, "stable": 2, "insufficient_data": 3}
+
+    def _cluster_sort_key(cid_str: str) -> tuple:
+        sig = cluster_signals.get(cid_str, {})
+        vel_dir = sig.get("velocity", {}).get("direction", "insufficient_data")
+        conf = sig.get("confidence_banner", "low")
+        conf_order = {"high": 0, "medium": 1, "low": 2}
+        return (_dir_order.get(vel_dir, 3), conf_order.get(conf, 2))
+
+    sorted_cids = sorted(labels.keys(), key=_cluster_sort_key)
+
+    # ---- Cover page ----
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 20)
+    pdf.cell(0, 12, "GM Reddit — Trend Briefing", ln=True)
+    pdf.set_font("Helvetica", "", 11)
+    pdf.ln(2)
+
+    if computed_at:
+        import datetime
+        dt = datetime.datetime.fromtimestamp(float(computed_at)).strftime("%Y-%m-%d %H:%M UTC")
+        pdf.cell(0, 7, f"Generated: {dt}", ln=True)
+    pdf.cell(0, 7, f"Clusters analyzed: {len(labels)}", ln=True)
+    if has_timestamps:
+        pdf.cell(0, 7, f"Data span: {data_span} days", ln=True)
+    else:
+        pdf.cell(0, 7, "Note: no timestamps in dataset — trend signals unavailable.", ln=True)
+        pdf.cell(0, 7, "Cluster labels reflect thematic content only.", ln=True)
+
+    pdf.ln(4)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, "Cluster Summary", ln=True)
+    pdf.set_font("Helvetica", "", 10)
+
+    for cid_str in sorted_cids:
+        label_info = labels.get(cid_str, {})
+        sig = cluster_signals.get(cid_str, {})
+        short = str(label_info.get("short_label", f"Cluster {cid_str}"))[:60]
+        conf = sig.get("confidence_banner", "")
+        conf_mark = _CONFIDENCE_EMOJI.get(conf, "")
+        vel_dir = _DIRECTION_LABEL.get(
+            sig.get("velocity", {}).get("direction", ""), ""
+        )
+        row_text = f"  Cluster {cid_str}: {short}"
+        if vel_dir:
+            row_text += f"  [{vel_dir}]"
+        if conf_mark:
+            row_text += f"  {conf_mark}"
+        pdf.cell(0, 6, row_text, ln=True)
+
+    # ---- Per-cluster pages ----
+    for cid_str in sorted_cids:
+        label_info = labels.get(cid_str, {})
+        ctx = examples.get(cid_str, {})
+        sig = cluster_signals.get(cid_str, {})
+
+        pdf.add_page()
+        pdf.set_font("Helvetica", "B", 14)
+        short = str(label_info.get("short_label", f"Cluster {cid_str}"))
+        pdf.cell(0, 9, f"Cluster {cid_str}: {short}", ln=True)
+
+        pdf.set_font("Helvetica", "", 10)
+        detailed = str(label_info.get("detailed_label", ""))
+        if detailed:
+            pdf.multi_cell(0, 6, detailed)
+            pdf.ln(2)
+
+        # Trend signals section
+        if sig:
+            conf = sig.get("confidence_banner", "low")
+            conf_note = sig.get("confidence_note", "")
+            pdf.set_font("Helvetica", "B", 11)
+            pdf.cell(0, 7, f"Trend Signals  [{conf.upper()} confidence]", ln=True)
+            pdf.set_font("Helvetica", "", 10)
+
+            if conf_note:
+                pdf.multi_cell(0, 6, conf_note)
+                pdf.ln(1)
+
+            vel = sig.get("velocity", {})
+            zsc = sig.get("zscore", {})
+
+            vel_dir = _DIRECTION_LABEL.get(vel.get("direction", ""), "N/A")
+            pdf.cell(0, 6, f"  Velocity: {vel_dir}  —  {vel.get('data_note', '')}", ln=True)
+
+            zsc_dir = _DIRECTION_LABEL.get(zsc.get("direction", ""), "N/A")
+            pdf.cell(0, 6, f"  Z-score: {zsc_dir}  —  {zsc.get('data_note', '')}", ln=True)
+
+            agreement = sig.get("agreement", "")
+            if agreement:
+                pdf.cell(0, 6, f"  Signal agreement: {agreement}", ln=True)
+        else:
+            pdf.set_font("Helvetica", "I", 10)
+            pdf.cell(0, 6, "Trend signals not available (run /api/trends/run first).", ln=True)
+
+        pdf.ln(3)
+
+        # Cluster metadata
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.cell(0, 7, "Cluster Metadata", ln=True)
+        pdf.set_font("Helvetica", "", 10)
+        pdf.cell(0, 6, f"  Size: {ctx.get('cluster_size', len(sig.get('velocity', {}).get('recent_count', 0) or 0))} comments", ln=True)
+        top_vehicles = ctx.get("top_vehicles", [])
+        if top_vehicles:
+            pdf.cell(0, 6, f"  Top vehicles: {', '.join(str(v) for v in top_vehicles[:3])}", ln=True)
+        top_cats = ctx.get("top_categories", [])
+        if top_cats:
+            pdf.cell(0, 6, f"  Top categories: {', '.join(str(c).replace('_', ' ') for c in top_cats[:3])}", ln=True)
+        sentiment = ctx.get("sentiment_mix", {})
+        if sentiment:
+            sent_parts = [f"{k}: {v}" for k, v in list(sentiment.items())[:3]]
+            pdf.cell(0, 6, f"  Sentiment: {', '.join(sent_parts)}", ln=True)
+
+        pdf.ln(3)
+
+        # Representative examples
+        centroid_text = ctx.get("centroid_reps_text", "")
+        if centroid_text:
+            pdf.set_font("Helvetica", "B", 11)
+            pdf.cell(0, 7, "Representative Comments", ln=True)
+            pdf.set_font("Courier", "", 8)
+            for line in centroid_text.splitlines()[:6]:
+                if len(line) > 120:
+                    for chunk_start in range(0, len(line), 120):
+                        pdf.cell(0, 4, line[chunk_start: chunk_start + 120], ln=True)
+                else:
+                    pdf.cell(0, 4, line if line else " ", ln=True)
+
+    tmp = pdf_path.with_suffix(".tmp")
+    pdf.output(str(tmp))
+    os.replace(tmp, pdf_path)
+    return pdf_path

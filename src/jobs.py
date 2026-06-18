@@ -25,7 +25,7 @@ from typing import Any
 HEARTBEAT_STALE_SECS = 120
 
 # All valid job kinds in this system
-JOB_KINDS = frozenset({"classify", "pdf_export", "trend", "faiss_qa"})
+JOB_KINDS = frozenset({"classify", "pdf_export", "trend", "trend_briefing", "faiss_qa"})
 
 # States that mean the job is done (no longer active)
 _TERMINAL_STATES = frozenset({"completed", "failed", "interrupted"})
