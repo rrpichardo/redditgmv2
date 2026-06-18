@@ -4,7 +4,6 @@ live_server: boots a real uvicorn against ROOT, seeded with the golden fixture
 under a throwaway tag (runtime/ is gitignored). browser_page: a Playwright
 Chromium page; skips (does not fail) when Playwright/Chromium is unavailable.
 """
-import json
 import shutil
 import socket
 import subprocess
@@ -45,6 +44,8 @@ def live_server():
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app:app", "--port", str(port), "--log-level", "warning"],
         cwd=str(ROOT),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     base = f"http://127.0.0.1:{port}"
     try:
@@ -62,7 +63,7 @@ def live_server():
         proc.terminate()
         try:
             proc.wait(timeout=5)
-        except Exception:
+        except subprocess.TimeoutExpired:
             proc.kill()
         shutil.rmtree(ROOT / "runtime" / TEST_TAG, ignore_errors=True)
 
