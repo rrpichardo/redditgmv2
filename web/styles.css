@@ -1,5 +1,56 @@
 @import url("https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800;900&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap");
 
+/* ── Phase-0 design tokens (additive; existing vars below unchanged) ──────── */
+:root {
+  /* neutral UI palette */
+  --bg-page: #f6f7f9;
+  --bg-surface: #ffffff;
+  --bg-muted: #f1f5f9;
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-tertiary: #94a3b8;
+  --border-subtle: rgba(15, 23, 42, 0.08);
+  --border-strong: rgba(15, 23, 42, 0.16);
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-6: 24px;
+  --motion-fast: 150ms; --motion-base: 220ms;
+
+  /* data-sentiment tokens (mirror src/charts.py color_maps; non-chart UI) */
+  --data-negative: #ef4444;
+  --data-neutral: #94a3b8;
+  --data-positive: #22c55e;
+  --data-critical: #dc2626;
+  --data-major: #f59e0b;
+  --data-minor: #3b82f6;
+  --data-none: #94a3b8;
+
+  /* system-status tokens (separate hue lane; red reserved for data-negative) */
+  --status-pending: #94a3b8;
+  --status-running: #2563eb;
+  --status-done: #15803d;
+  --status-warning: #b45309;
+  --status-blocked: #475569;
+  --status-skipped: #94a3b8;
+  --status-failed: #be123c;   /* rose-700 — distinct hue from data-negative #ef4444 */
+  --status-cancelled: #64748b;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --motion-fast: 0ms; --motion-base: 0ms; }
+}
+
+/* status pill: color + icon + label (never color alone) — TODO Task 5: add ::before icon rule */
+.status-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 9px; border-radius: var(--radius-md); }
+.status-pill[data-status="pending"]   { color: var(--status-pending); }
+.status-pill[data-status="running"]   { color: var(--status-running); }
+.status-pill[data-status="completed"] { color: var(--status-done); }
+.status-pill[data-status="completed_with_warnings"] { color: var(--status-warning); }
+.status-pill[data-status="blocked"]   { color: var(--status-blocked); }
+.status-pill[data-status="skipped"]   { color: var(--status-skipped); }
+.status-pill[data-status="failed"]    { color: var(--status-failed); }
+.status-pill[data-status="cancelled"] { color: var(--status-cancelled); }
+
 /* ── Design tokens ───────────────────────────── */
 :root {
   --ink: #171717;
