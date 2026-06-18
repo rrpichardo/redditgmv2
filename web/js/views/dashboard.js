@@ -6,9 +6,8 @@ import { evidenceFeed } from "./explore.js";
 export function dashboard() {
   const data = state.data;
   if (!data?.summary.metrics.total_rows) return emptyState();
-  const charts = data.charts;
-  const topTheme = topItem(charts.complaints, "theme");
-  const topVehicle = topItem(charts.vehicles, "vehicle_mentioned", "comment_count");
+  const topTheme = topItem(data.chart_data?.complaints, "theme");
+  const topVehicle = topItem(data.chart_data?.vehicles, "vehicle_mentioned", "comment_count");
   return `
     <section class="readout-deck">
       <div>${metricGrid(data.summary.metrics)}</div>
