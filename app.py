@@ -145,6 +145,13 @@ class TrendJobRequest(BaseModel):
     n_clusters: int = 10
 
 
+class TrendBriefingRequest(BaseModel):
+    tag: str = DEFAULT_TAG
+    provider: str = "openrouter"
+    model: str = ""
+    api_key: str = ""
+
+
 def run_dir(tag: str) -> Path:
     return RUNTIME / clean_tag(tag)
 
@@ -991,24 +998,28 @@ def trends_status(tag: str = DEFAULT_TAG, job_id: str = "") -> JSONResponse:
 
 @app.get("/api/trends")
 def trends_results(tag: str = DEFAULT_TAG) -> JSONResponse:
-    """Return cluster labels and examples from the most recent clustering run."""
+    """Return cluster labels, examples, and trend signals from the most recent clustering run."""
     from src.trend_insights import trends_dir
     tag = clean_tag(tag)
     tdir = trends_dir(RUNTIME, tag)
     labels_path = tdir / "cluster_labels.json"
     examples_path = tdir / "cluster_examples.json"
     metadata_path = tdir / "embedding_metadata.json"
+    signals_path = tdir / "trend_signals.json"
     if not labels_path.exists():
         return safe_json({"ok": False, "detail": "No clustering results found. Run /api/trends/run first.", "clusters": []})
     try:
         labels = json.loads(labels_path.read_text(encoding="utf-8"))
         examples = json.loads(examples_path.read_text(encoding="utf-8")) if examples_path.exists() else {}
         metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+        signals_doc = json.loads(signals_path.read_text(encoding="utf-8")) if signals_path.exists() else {}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Could not read clustering artifacts: {exc}") from exc
+    cluster_signals = signals_doc.get("signals", {})
     clusters = []
     for cid_str, label in sorted(labels.items(), key=lambda x: int(x[0])):
         ctx = examples.get(cid_str, {})
+        sig = cluster_signals.get(cid_str, {})
         clusters.append({
             "cluster_id": int(cid_str),
             "label": label,
@@ -1017,13 +1028,90 @@ def trends_results(tag: str = DEFAULT_TAG) -> JSONResponse:
             "severity_mix": ctx.get("severity_mix", {}),
             "top_vehicles": ctx.get("top_vehicles", []),
             "top_categories": ctx.get("top_categories", []),
+            "trend_signal": sig,
         })
     return safe_json({
         "ok": True,
         "tag": tag,
         "metadata": metadata,
+        "trend_summary": {
+            "has_timestamps": signals_doc.get("has_timestamps", False),
+            "data_span_days": signals_doc.get("data_span_days", 0),
+            "computed_at": signals_doc.get("computed_at"),
+        } if signals_doc else None,
         "clusters": clusters,
     })
+
+
+@app.post("/api/trends/briefing")
+def trends_briefing(request: TrendBriefingRequest) -> JSONResponse:
+    """Start a trend briefing PDF job. Returns existing job if one is running."""
+    tag = clean_tag(request.tag)
+    active = find_active_job(RUNTIME, tag, "trend_briefing")
+    if active:
+        return safe_json({**active, "started": False})
+    from src.trend_insights import trends_dir
+    tdir = trends_dir(RUNTIME, tag)
+    if not (tdir / "cluster_labels.json").exists():
+        raise HTTPException(
+            status_code=400,
+            detail="No clustering results found. Run /api/trends/run first.",
+        )
+    pcfg = provider_config(request.provider, request.model, request.api_key)
+    env: dict[str, str] = {}
+    if request.api_key:
+        env[pcfg.api_key_env] = request.api_key
+    extra_args = [
+        "--provider", pcfg.provider,
+        "--model", pcfg.model,
+        "--api_key_env", pcfg.api_key_env,
+    ]
+    status = start_job(
+        RUNTIME, tag, "trend_briefing",
+        ROOT / "scripts" / "trend_briefing_job.py",
+        extra_args,
+        env=env,
+        cwd=ROOT,
+    )
+    return safe_json({**status, "started": True})
+
+
+@app.get("/api/trends/briefing/status")
+def trends_briefing_status(tag: str = DEFAULT_TAG, job_id: str = "") -> JSONResponse:
+    """Return the most recent trend briefing job status."""
+    tag = clean_tag(tag)
+    if job_id:
+        status = read_status(job_path(RUNTIME, tag, job_id))
+    else:
+        status = find_active_job(RUNTIME, tag, "trend_briefing")
+        if not status:
+            d = RUNTIME / tag / "jobs"
+            if d.exists():
+                all_jobs = [
+                    s for p in d.glob("*.json")
+                    if (s := read_status(p)) and s.get("kind") == "trend_briefing"
+                ]
+                if all_jobs:
+                    status = max(all_jobs, key=lambda s: float(s.get("started_at", 0)))
+    if not status:
+        return safe_json({"state": "idle", "tag": tag})
+    return safe_json(status)
+
+
+@app.get("/api/download/trend-pdf")
+def download_trend_pdf(tag: str = DEFAULT_TAG) -> Response:
+    """Download the trend briefing PDF produced by a completed trend_briefing job."""
+    clean = clean_tag(tag)
+    path = run_dir(clean) / "downloads" / f"{clean}_trend_briefing.pdf"
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Trend briefing PDF not ready. Start a job with POST /api/trends/briefing first.",
+        )
+    return FileResponse(
+        path, media_type="application/pdf",
+        filename=f"{clean}_gm_trend_briefing.pdf",
+    )
 
 
 @app.get("/api/health")

@@ -605,3 +605,283 @@ def run_clustering(
         "artifact_paths": artifact_paths,
         "cluster_labels": cluster_labels,
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: Trend signal analysis
+# ---------------------------------------------------------------------------
+
+# Minimum data requirements — below these thresholds results are directional only
+MIN_BASELINE_DAYS = 7
+MIN_RECENT_DAYS = 3
+MIN_PERIODS = 4          # weekly periods needed for statistically valid z-score
+
+VELOCITY_RECENT_DAYS = 7
+VELOCITY_BASELINE_DAYS = 30
+
+
+def _cluster_timestamps(source_ids: list[str], df: pd.DataFrame) -> pd.Series:
+    """Extract parsed timestamps for the rows that belong to a cluster."""
+    if "source_id" not in df.columns or "created_at_norm" not in df.columns:
+        return pd.Series([], dtype="datetime64[ns]")
+    mask = df["source_id"].isin(set(source_ids))
+    ts = pd.to_datetime(df.loc[mask, "created_at_norm"], errors="coerce")
+    return ts.dropna()
+
+
+def compute_velocity(
+    source_ids: list[str],
+    df: pd.DataFrame,
+    recent_days: int = VELOCITY_RECENT_DAYS,
+    baseline_days: int = VELOCITY_BASELINE_DAYS,
+) -> dict[str, Any]:
+    """Compute velocity: relative change in daily post rate (recent vs baseline window).
+
+    Safeguards:
+      - Returns valid=False when baseline < 2 posts or recent window is empty.
+      - direction is still returned as directional signal even when valid=False.
+    """
+    ts = _cluster_timestamps(source_ids, df)
+
+    if ts.empty:
+        return {
+            "velocity": None, "direction": "insufficient_data", "valid": False,
+            "data_note": "No timestamps available for this cluster.",
+            "recent_count": 0, "baseline_count": 0,
+        }
+
+    now = ts.max()
+    recent_cutoff = now - pd.Timedelta(days=recent_days)
+    baseline_start = now - pd.Timedelta(days=recent_days + baseline_days)
+
+    recent_count = int((ts >= recent_cutoff).sum())
+    baseline_count = int(((ts >= baseline_start) & (ts < recent_cutoff)).sum())
+
+    if recent_count == 0 and baseline_count == 0:
+        return {
+            "velocity": None, "direction": "insufficient_data", "valid": False,
+            "data_note": f"No posts in the last {recent_days + baseline_days} days.",
+            "recent_count": 0, "baseline_count": 0,
+        }
+
+    recent_rate = recent_count / max(recent_days, 1)
+    baseline_rate = baseline_count / max(baseline_days, 1)
+
+    if baseline_count < 2:
+        direction = "rising" if recent_count > 0 else "falling"
+        return {
+            "velocity": None, "direction": direction, "valid": False,
+            "data_note": (
+                f"Only {baseline_count} post(s) in {baseline_days}-day baseline — directional only."
+            ),
+            "recent_count": recent_count, "baseline_count": baseline_count,
+        }
+
+    if recent_count == 0:
+        return {
+            "velocity": None, "direction": "falling", "valid": False,
+            "data_note": f"No posts in recent {recent_days}-day window — directional only.",
+            "recent_count": 0, "baseline_count": baseline_count,
+        }
+
+    velocity = (recent_rate - baseline_rate) / max(baseline_rate, 1e-9)
+    direction = "rising" if velocity > 0.2 else ("falling" if velocity < -0.2 else "stable")
+    valid = recent_count >= 2 and baseline_count >= 3
+    note = f"{recent_count} posts (recent {recent_days}d) vs {baseline_count} posts (prior {baseline_days}d)."
+    if not valid:
+        note += " Low post count — treat as directional."
+
+    return {
+        "velocity": round(float(velocity), 3),
+        "direction": direction,
+        "valid": valid,
+        "data_note": note,
+        "recent_count": recent_count,
+        "baseline_count": baseline_count,
+    }
+
+
+def compute_zscore(
+    source_ids: list[str],
+    df: pd.DataFrame,
+    period_days: int = 7,
+) -> dict[str, Any]:
+    """Compute z-score of the most recent period vs historical distribution.
+
+    Safeguard: if n_periods < MIN_PERIODS the result is marked directional_only=True.
+    """
+    ts = _cluster_timestamps(source_ids, df)
+
+    if ts.empty:
+        return {
+            "zscore": None, "direction": "insufficient_data", "valid": False,
+            "directional_only": False, "n_periods": 0, "period_counts": [],
+            "data_note": "No timestamps available.",
+        }
+
+    earliest = ts.min()
+    now = ts.max()
+    total_days = max(int((now - earliest).days) + 1, 1)
+    n_periods = max(1, total_days // period_days)
+
+    period_counts: list[int] = []
+    for i in range(n_periods):
+        start = earliest + pd.Timedelta(days=i * period_days)
+        end = start + pd.Timedelta(days=period_days)
+        period_counts.append(int(((ts >= start) & (ts < end)).sum()))
+
+    if n_periods < 2:
+        return {
+            "zscore": None, "direction": "insufficient_data", "valid": False,
+            "directional_only": False, "n_periods": n_periods,
+            "period_counts": period_counts,
+            "data_note": f"Only {n_periods} time period — need at least 2.",
+        }
+
+    counts_arr = np.array(period_counts, dtype=float)
+    mean = float(counts_arr.mean())
+    std = float(counts_arr.std())
+
+    if std < 1e-9:
+        return {
+            "zscore": 0.0, "direction": "stable", "valid": n_periods >= MIN_PERIODS,
+            "directional_only": n_periods < MIN_PERIODS, "n_periods": n_periods,
+            "period_counts": period_counts,
+            "data_note": f"Uniform activity across {n_periods} periods (no variance).",
+        }
+
+    zscore = (float(counts_arr[-1]) - mean) / std
+    direction = "rising" if zscore > 1.0 else ("falling" if zscore < -1.0 else "stable")
+    valid = n_periods >= MIN_PERIODS
+    directional_only = (n_periods >= 2) and not valid
+    recent = int(counts_arr[-1])
+
+    if valid:
+        note = f"{n_periods} weekly periods. Most recent: {recent} posts (mean: {mean:.1f})."
+    else:
+        note = f"Only {n_periods} period(s) — z-score directional, not statistically reliable."
+
+    return {
+        "zscore": round(float(zscore), 3),
+        "direction": direction,
+        "valid": valid,
+        "directional_only": directional_only,
+        "n_periods": n_periods,
+        "period_counts": [int(c) for c in period_counts],
+        "data_note": note,
+    }
+
+
+def _signal_agreement(dir_a: str, dir_b: str) -> str:
+    """Classify whether two direction signals agree, diverge, or are partial."""
+    if dir_a == "insufficient_data" or dir_b == "insufficient_data":
+        return "one_insufficient"
+    if dir_a == dir_b:
+        return "agree"
+    if {dir_a, dir_b} == {"rising", "falling"}:
+        return "diverge"
+    return "partial"  # one stable, one directional
+
+
+def trend_confidence_banner(
+    velocity: dict[str, Any],
+    zscore: dict[str, Any],
+) -> tuple[str, str]:
+    """Return (confidence_level, human-readable note) summarizing data quality.
+
+    confidence_level: "high" | "medium" | "low"
+    """
+    v_valid = velocity.get("valid", False)
+    z_valid = zscore.get("valid", False)
+    v_dir = velocity.get("direction", "insufficient_data")
+    z_dir = zscore.get("direction", "insufficient_data")
+    agreement = _signal_agreement(v_dir, z_dir)
+
+    if v_valid and z_valid and agreement == "agree":
+        return "high", f"Both velocity and z-score agree: {v_dir} activity."
+
+    if (v_valid or z_valid) and agreement in ("agree", "partial"):
+        if v_valid and not z_valid:
+            return "medium", f"Velocity shows {v_dir}. Too few time periods for z-score reliability."
+        if z_valid and not v_valid:
+            return "medium", f"Z-score shows {z_dir}. Velocity window had insufficient data."
+        return "medium", f"Signals partially agree: {v_dir} (velocity) / {z_dir} (z-score)."
+
+    if agreement == "diverge":
+        return "low", f"Signals diverge: velocity={v_dir}, z-score={z_dir}. Treat with caution."
+
+    return "low", "Insufficient data for reliable trend detection on this cluster."
+
+
+def run_trend_analysis(
+    tag: str,
+    df: pd.DataFrame,
+    runtime_root: Path,
+    recent_days: int = VELOCITY_RECENT_DAYS,
+    baseline_days: int = VELOCITY_BASELINE_DAYS,
+    period_days: int = 7,
+) -> dict[str, Any]:
+    """Compute velocity, z-score, and agreement signals for each cluster.
+
+    Reads clusters.json and cluster_labels.json from the trends dir.
+    Saves trend_signals.json under runtime/<tag>/trends/.
+    Returns a summary dict with all computed signals.
+    """
+    tdir = trends_dir(runtime_root, tag)
+    clusters_path = tdir / "clusters.json"
+    labels_path = tdir / "cluster_labels.json"
+
+    if not clusters_path.exists():
+        raise FileNotFoundError(
+            f"clusters.json not found at {clusters_path}. Run clustering first."
+        )
+
+    clusters: dict[str, list[str]] = json.loads(clusters_path.read_text(encoding="utf-8"))
+    labels: dict[str, Any] = (
+        json.loads(labels_path.read_text(encoding="utf-8")) if labels_path.exists() else {}
+    )
+
+    has_timestamps = (
+        "created_at_norm" in df.columns
+        and pd.to_datetime(df["created_at_norm"], errors="coerce").notna().any()
+    )
+
+    if has_timestamps:
+        ts_all = pd.to_datetime(df["created_at_norm"], errors="coerce").dropna()
+        data_span_days = int((ts_all.max() - ts_all.min()).days) if len(ts_all) > 1 else 0
+    else:
+        data_span_days = 0
+
+    signals: dict[str, Any] = {}
+    for cid_str, source_ids in clusters.items():
+        label_info = labels.get(cid_str, {})
+        vel = compute_velocity(source_ids, df, recent_days, baseline_days)
+        zsc = compute_zscore(source_ids, df, period_days)
+        conf_level, conf_note = trend_confidence_banner(vel, zsc)
+        agreement = _signal_agreement(
+            vel.get("direction", "insufficient_data"),
+            zsc.get("direction", "insufficient_data"),
+        )
+        signals[cid_str] = {
+            "cluster_id": int(cid_str),
+            "short_label": label_info.get("short_label", f"Cluster {cid_str}"),
+            "theme_type": label_info.get("theme_type", "other"),
+            "cluster_size": len(source_ids),
+            "velocity": vel,
+            "zscore": zsc,
+            "agreement": agreement,
+            "confidence_banner": conf_level,
+            "confidence_note": conf_note,
+        }
+
+    result: dict[str, Any] = {
+        "computed_at": time.time(),
+        "tag": tag,
+        "has_timestamps": has_timestamps,
+        "data_span_days": data_span_days,
+        "n_clusters": len(signals),
+        "signals": signals,
+    }
+
+    _atomic_json(tdir / "trend_signals.json", result)
+    return result

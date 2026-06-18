@@ -1,5 +1,5 @@
 # scripts/trend_job.py
-"""Subprocess job: KMeans + FAISS clustering with LLM cluster labeling (Phase 4)."""
+"""Subprocess job: KMeans + FAISS clustering (Phase 4) + trend signal analysis (Phase 5)."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from src.gm_insights import ProviderConfig, load_classified
 from src.jobs import job_path, write_status
-from src.trend_insights import run_clustering
+from src.trend_insights import run_clustering, run_trend_analysis, trends_dir
 
 
 def run_trend_job(
@@ -51,13 +51,31 @@ def run_trend_job(
             heartbeat_cb=heartbeat,
         )
 
-        write_status(status_path, {
+        # Phase 5: compute trend signals (velocity + z-score) — non-fatal
+        trend_warning = None
+        try:
+            heartbeat(result["n_clusters"], result["n_clusters"])
+            trend_result = run_trend_analysis(
+                tag=tag, df=df, runtime_root=runtime_root
+            )
+            signals_path = str(trends_dir(runtime_root, tag) / "trend_signals.json")
+            result["artifact_paths"].append(signals_path)
+            result["n_signals"] = trend_result["n_clusters"]
+        except Exception as trend_exc:
+            # Clustering succeeded; trend analysis failure is surfaced as a warning
+            trend_warning = str(trend_exc)[:300]
+
+        completed_fields: dict = {
             "state": "completed",
             "completed_at": time.time(),
             "n_clusters": result["n_clusters"],
             "n_docs": result["n_docs"],
             "artifact_paths": result["artifact_paths"],
-        })
+        }
+        if trend_warning:
+            completed_fields["trend_warning"] = trend_warning
+
+        write_status(status_path, completed_fields)
 
     except Exception as exc:
         write_status(status_path, {
