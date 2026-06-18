@@ -114,9 +114,10 @@ def _load_app_with_data(page, live_server):
     # expect_response is a context manager — we enter it before the action that
     # fires the request, so Playwright can capture the response reliably.
     page.goto(live_server.url)
-    page.fill("#tagInput", live_server.tag)
-    with page.expect_response(lambda r: "/api/run" in r.url and r.status == 200, timeout=15000):
+    page.fill("#tagInput", live_server.tag, timeout=5000)  # explicit timeout so fill failures surface immediately
+    with page.expect_response(lambda r: "/api/run" in r.url and r.status == 200, timeout=15000) as resp_info:
         page.dispatch_event("#tagInput", "change")
+    # resp_info.value is available for debugging after this block
 
 
 def test_explore_charts_render_as_echarts_canvas(live_server, browser_page):
@@ -140,7 +141,7 @@ def test_all_tabs_no_console_errors(live_server, browser_page):
     _load_app_with_data(page, live_server)
     for view in ["dashboard", "collect", "classify", "explore", "briefing", "trends", "qa"]:
         page.click(f'.tab[data-view="{view}"]')
-        page.wait_for_timeout(200)
+        page.wait_for_timeout(500)  # bumped from 200ms to give each tab time to settle
     assert errors == [], f"console/page errors: {errors}"
 
 
@@ -150,10 +151,15 @@ def test_no_horizontal_overflow_three_viewports(live_server, browser_page):
     for width, height in [(1440, 900), (768, 1024), (375, 812)]:
         page.set_viewport_size({"width": width, "height": height})
         _load_app_with_data(page, live_server)
-        page.click('.tab[data-view="explore"]')
-        page.wait_for_timeout(300)
-        # scrollWidth > clientWidth + 1 means real overflow (1px tolerance for rounding)
-        overflow = page.evaluate(
-            "() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1"
-        )
-        assert not overflow, f"horizontal overflow at {width}px"
+        for view in ["dashboard", "explore"]:
+            page.click(f'.tab[data-view="{view}"]')
+            page.wait_for_timeout(300)
+            # scrollWidth > clientWidth + 1 means real overflow (1px tolerance for rounding)
+            html_overflow = page.evaluate(
+                "() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1"
+            )
+            body_overflow = page.evaluate(
+                "() => document.body.scrollWidth > document.body.clientWidth + 1"
+            )
+            assert not html_overflow, f"html horizontal overflow on {view} at {width}px"
+            assert not body_overflow, f"body horizontal overflow on {view} at {width}px"
