@@ -25,9 +25,6 @@ function ensureTheme() {
 // Map from DOM element → ECharts instance so we can dispose on re-render.
 const instances = new Map();
 
-// Detect OS-level reduced-motion preference at load time.
-const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-
 // Dispose the ECharts instance attached to el (if any) and remove it from the registry.
 export function disposeChart(el) {
   const inst = instances.get(el);
@@ -248,6 +245,8 @@ export function renderChartInto(el, spec, data) {
   const option = buildChartOption(spec, data);
   if (!option) { el.innerHTML = `<div class="notice">Unsupported chart type.</div>`; return; }
   ensureTheme();
+  // Lazy-read reduced-motion preference at render time (not module load).
+  const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
   const inst = echarts.init(el, THEME_NAME, { renderer: "canvas" });
   inst.setOption(Object.assign({ animation: !reduceMotion }, option));
   instances.set(el, inst);
