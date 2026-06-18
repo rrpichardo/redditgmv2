@@ -137,6 +137,14 @@ class PdfExportJobRequest(BaseModel):
     kind: str = "charts"  # "charts" | "briefing"
 
 
+class TrendJobRequest(BaseModel):
+    tag: str = DEFAULT_TAG
+    provider: str = "openrouter"
+    model: str = ""
+    api_key: str = ""
+    n_clusters: int = 10
+
+
 def run_dir(tag: str) -> Path:
     return RUNTIME / clean_tag(tag)
 
@@ -922,6 +930,100 @@ def download_briefing_pdf(tag: str = DEFAULT_TAG) -> Response:
         path, media_type="application/pdf",
         filename=f"{clean}_gm_reddit_briefing.pdf",
     )
+
+
+@app.post("/api/trends/run")
+def trends_run(request: TrendJobRequest) -> JSONResponse:
+    """Start a KMeans+FAISS clustering job. Returns existing job if one is running."""
+    tag = clean_tag(request.tag)
+    active = find_active_job(RUNTIME, tag, "trend")
+    if active:
+        return safe_json({**active, "started": False})
+    cpath = classified_path(tag)
+    if not cpath.exists():
+        raise HTTPException(
+            status_code=400,
+            detail="No classified CSV found for this tag. Run classification first.",
+        )
+    pcfg = provider_config(request.provider, request.model, request.api_key)
+    env: dict[str, str] = {}
+    if request.api_key:
+        env[pcfg.api_key_env] = request.api_key
+    extra_args = [
+        "--classified_path", str(cpath),
+        "--n_clusters", str(max(2, request.n_clusters)),
+        "--provider", pcfg.provider,
+        "--base_url", pcfg.base_url,
+        "--model", pcfg.model,
+        "--api_key_env", pcfg.api_key_env,
+    ]
+    status = start_job(
+        RUNTIME, tag, "trend",
+        ROOT / "scripts" / "trend_job.py",
+        extra_args,
+        env=env,
+        cwd=ROOT,
+    )
+    return safe_json({**status, "started": True})
+
+
+@app.get("/api/trends/status")
+def trends_status(tag: str = DEFAULT_TAG, job_id: str = "") -> JSONResponse:
+    """Return the most recent trend job status."""
+    tag = clean_tag(tag)
+    if job_id:
+        status = read_status(job_path(RUNTIME, tag, job_id))
+    else:
+        status = find_active_job(RUNTIME, tag, "trend")
+        if not status:
+            d = RUNTIME / tag / "jobs"
+            if d.exists():
+                all_jobs = [
+                    s for p in d.glob("*.json")
+                    if (s := read_status(p)) and s.get("kind") == "trend"
+                ]
+                if all_jobs:
+                    status = max(all_jobs, key=lambda s: float(s.get("started_at", 0)))
+    if not status:
+        return safe_json({"state": "idle", "tag": tag})
+    return safe_json(status)
+
+
+@app.get("/api/trends")
+def trends_results(tag: str = DEFAULT_TAG) -> JSONResponse:
+    """Return cluster labels and examples from the most recent clustering run."""
+    from src.trend_insights import trends_dir
+    tag = clean_tag(tag)
+    tdir = trends_dir(RUNTIME, tag)
+    labels_path = tdir / "cluster_labels.json"
+    examples_path = tdir / "cluster_examples.json"
+    metadata_path = tdir / "embedding_metadata.json"
+    if not labels_path.exists():
+        return safe_json({"ok": False, "detail": "No clustering results found. Run /api/trends/run first.", "clusters": []})
+    try:
+        labels = json.loads(labels_path.read_text(encoding="utf-8"))
+        examples = json.loads(examples_path.read_text(encoding="utf-8")) if examples_path.exists() else {}
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not read clustering artifacts: {exc}") from exc
+    clusters = []
+    for cid_str, label in sorted(labels.items(), key=lambda x: int(x[0])):
+        ctx = examples.get(cid_str, {})
+        clusters.append({
+            "cluster_id": int(cid_str),
+            "label": label,
+            "cluster_size": ctx.get("cluster_size", 0),
+            "sentiment_mix": ctx.get("sentiment_mix", {}),
+            "severity_mix": ctx.get("severity_mix", {}),
+            "top_vehicles": ctx.get("top_vehicles", []),
+            "top_categories": ctx.get("top_categories", []),
+        })
+    return safe_json({
+        "ok": True,
+        "tag": tag,
+        "metadata": metadata,
+        "clusters": clusters,
+    })
 
 
 @app.get("/api/health")
