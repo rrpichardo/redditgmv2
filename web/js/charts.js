@@ -1,7 +1,7 @@
 // charts.js — ECharts rendering: light theme, instance registry (dispose on
 // re-render), pure spec->option mapping for the 6 chart types, and a mount pass.
 // ECharts is a global (window.echarts) loaded via <script> in index.html.
-import { fmt, pct, humanLabel, debounce } from "./state.js";
+import { fmt, pct, humanLabel, debounce, esc } from "./state.js";
 
 const THEME_NAME = "redditgm";
 let themeRegistered = false;
@@ -242,7 +242,7 @@ export function renderChartInto(el, spec, data) {
   const rows = Array.isArray(data) ? data : [];
   const minRows = spec.minimum_rows == null ? 1 : spec.minimum_rows;
   if (spec.type !== "heatmap" && rows.length < minRows) {
-    el.innerHTML = `<div class="notice">${spec.fallback || "Insufficient data."}</div>`;
+    el.innerHTML = `<div class="notice">${esc(spec.fallback || "Insufficient data.")}</div>`;
     return;
   }
   const option = buildChartOption(spec, data);
@@ -261,7 +261,7 @@ export function mountViewCharts(root, payload) {
   root.querySelectorAll("[data-chart]").forEach((el) => {
     const id = el.getAttribute("data-chart");
     const spec = specs[id];
-    if (!spec) { el.innerHTML = `<div class="notice">Chart spec not found: ${id}.</div>`; return; }
+    if (!spec) { el.innerHTML = `<div class="notice">Chart spec not found: ${esc(id)}.</div>`; return; }
     renderChartInto(el, spec, cdata[id]);
   });
 }
