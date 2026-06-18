@@ -1,6 +1,6 @@
 @import url("https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800;900&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap");
 
-/* ── Phase-7 design tokens (additive; existing vars below unchanged) ──────── */
+/* ── Phase-0 design tokens (additive; existing vars below unchanged) ──────── */
 :root {
   /* neutral UI palette */
   --bg-page: #f6f7f9;
@@ -40,7 +40,7 @@
   :root { --motion-fast: 0ms; --motion-base: 0ms; }
 }
 
-/* status pill: color + icon + label (never color alone) */
+/* status pill: color + icon + label (never color alone) — TODO Task 5: add ::before icon rule */
 .status-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 9px; border-radius: var(--radius-md); }
 .status-pill[data-status="pending"]   { color: var(--status-pending); }
 .status-pill[data-status="running"]   { color: var(--status-running); }
