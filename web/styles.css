@@ -1105,6 +1105,372 @@ td a {
   line-height: 1.6;
 }
 
+/* ── Filter panel (explore view) ────────────── */
+.filter-panel {
+  margin-bottom: 1rem;
+}
+
+.filter-panel .panel-head {
+  margin-bottom: 0.6rem;
+}
+
+.filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 0.65rem;
+}
+
+.filter-control {
+  display: flex;
+  flex-direction: column;
+}
+
+.filter-label {
+  display: block;
+  color: var(--muted);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 0.3rem;
+}
+
+.filter-select {
+  width: 100%;
+  min-height: 80px;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 0.35rem 0.55rem;
+  font-size: 0.85rem;
+  transition: border-color 120ms;
+}
+
+.filter-select:focus {
+  border-color: var(--blue);
+  outline: none;
+}
+
+.filter-input {
+  width: 100%;
+  min-height: 36px;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 0.4rem 0.6rem;
+  font-size: 0.88rem;
+  transition: border-color 120ms;
+}
+
+.filter-input:focus {
+  border-color: var(--blue);
+  outline: none;
+}
+
+.filter-active-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  border-radius: 999px;
+  padding: 0 0.5rem;
+  background: var(--blue);
+  color: #fff;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.66rem;
+  font-weight: 700;
+  margin-left: 0.5rem;
+  vertical-align: middle;
+}
+
+.button.small {
+  min-height: 32px;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.8rem;
+}
+
+/* ── Stacked bar charts ──────────────────────── */
+.stacked-bar-list .bar-row {
+  grid-template-columns: minmax(7rem, 1fr) minmax(0, 1.5fr) minmax(3.5rem, auto);
+}
+
+.stacked-track {
+  display: flex;
+  height: 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--paper-2);
+}
+
+.stacked-seg {
+  height: 100%;
+  transition: width 300ms ease;
+}
+
+/* ── Grouped bars ────────────────────────────── */
+.grouped-bar-list {
+  display: grid;
+  gap: 1rem;
+}
+
+.grouped-group {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.group-label {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 800;
+  margin-bottom: 0.2rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.sub-bar-row {
+  grid-template-columns: minmax(9rem, 1fr) minmax(0, 1.5fr) minmax(3.5rem, auto);
+}
+
+.bar-sub-label {
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-family: "IBM Plex Mono", monospace;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Heatmap table ───────────────────────────── */
+.heatmap-wrap {
+  width: 100%;
+  overflow-x: auto;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 10px;
+}
+
+.heatmap-table {
+  min-width: 480px;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+
+.heatmap-table th,
+.heatmap-table td {
+  padding: 0.4rem 0.5rem;
+  text-align: center;
+  border: 1px solid var(--line-2);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.72rem;
+  white-space: nowrap;
+  min-width: 2.5rem;
+}
+
+.heatmap-table thead th {
+  background: var(--ink);
+  color: var(--surface);
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.heatmap-table tbody th {
+  background: var(--surface-2);
+  color: var(--ink);
+  text-align: left;
+  font-weight: 700;
+  position: sticky;
+  left: 0;
+}
+
+.heatmap-table td {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.hm-empty {
+  color: var(--faint) !important;
+  font-weight: 400 !important;
+}
+
+/* ── Job status card ─────────────────────────── */
+.job-status-card {
+  border: 1.5px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 1rem;
+  margin-top: 0.85rem;
+  box-shadow: var(--shadow-sm);
+}
+
+.job-status-card.running {
+  border-color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.job-status-card.success,
+.job-status-card.completed {
+  border-color: var(--green);
+  background: var(--green-soft);
+}
+
+.job-status-card.error,
+.job-status-card.failed {
+  border-color: var(--red);
+  background: var(--red-soft);
+}
+
+.job-status-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.65rem;
+}
+
+.job-state-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  border-radius: 999px;
+  padding: 0 0.6rem;
+  background: var(--ink);
+  color: var(--surface);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.job-kind-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  border-radius: 999px;
+  padding: 0 0.55rem;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--muted);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+
+.job-progress-track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--paper-2);
+  border: 1px solid var(--line);
+  overflow: hidden;
+  margin-bottom: 0.5rem;
+}
+
+.job-progress-fill {
+  height: 100%;
+  background: var(--blue);
+  border-radius: inherit;
+  transition: width 400ms ease;
+}
+
+.job-meta {
+  color: var(--muted);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.74rem;
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+}
+
+.job-artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.35rem;
+}
+
+.artifact-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  border-radius: 999px;
+  padding: 0 0.6rem;
+  border: 1px solid var(--green);
+  background: var(--green-soft);
+  color: var(--green);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.68rem;
+  font-weight: 600;
+  max-width: 18rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.error-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  border-radius: 999px;
+  padding: 0 0.6rem;
+  border: 1px solid var(--red);
+  background: var(--red-soft);
+  color: var(--red);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+/* ── Chart sections (explore grouping) ──────── */
+.chart-section {
+  margin-top: 1.5rem;
+}
+
+.chart-section-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0 0.65rem;
+  margin-bottom: 0;
+  border-bottom: 2px solid var(--line);
+}
+
+.chart-section-head h3 {
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin: 0;
+}
+
+.chart-panel {
+  /* intentionally inherits .panel — just marks chart containers */
+}
+
+.chart-note {
+  display: block;
+  margin-top: 0.4rem;
+  color: var(--faint);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.66rem;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+/* ── Panel helpers ───────────────────────────── */
+.panel-desc {
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.6;
+  margin: 0 0 0.9rem;
+}
+
 /* ── Responsive ──────────────────────────────── */
 @media (max-width: 1200px) {
   .app-shell {
