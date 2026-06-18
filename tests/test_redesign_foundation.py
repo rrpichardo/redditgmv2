@@ -103,3 +103,57 @@ def test_design_tokens_defined(live_server, browser_page):
     failed = page.evaluate("() => getComputedStyle(document.documentElement).getPropertyValue('--status-failed').trim()")
     negative = page.evaluate("() => getComputedStyle(document.documentElement).getPropertyValue('--data-negative').trim()")
     assert failed != negative, "system 'failed' must not reuse the data-negative red"
+
+
+# ---------------------------------------------------------------------------
+# Integration smoke tests — guard the split + ECharts wiring (Task 5 targets)
+# ---------------------------------------------------------------------------
+
+def _load_app_with_data(page, live_server):
+    # Navigate to the app and trigger a data load via the tag input.
+    # expect_response is a context manager — we enter it before the action that
+    # fires the request, so Playwright can capture the response reliably.
+    page.goto(live_server.url)
+    page.fill("#tagInput", live_server.tag)
+    with page.expect_response(lambda r: "/api/run" in r.url and r.status == 200, timeout=15000):
+        page.dispatch_event("#tagInput", "change")
+
+
+def test_explore_charts_render_as_echarts_canvas(live_server, browser_page):
+    # RED phase: current app uses hand-drawn HTML/SVG, not ECharts.
+    # This test defines the target — Task 5 makes it green by wiring ECharts.
+    page = browser_page
+    _load_app_with_data(page, live_server)
+    page.click('.tab[data-view="explore"]')
+    # ECharts renders into <canvas> elements; none exist in the current monolith
+    page.wait_for_selector("[data-chart] canvas", timeout=15000)
+    canvas_count = page.eval_on_selector_all("[data-chart] canvas", "els => els.length")
+    assert canvas_count >= 5, f"expected >=5 ECharts canvases in Explore, got {canvas_count}"
+
+
+def test_all_tabs_no_console_errors(live_server, browser_page):
+    # Guard: navigating through every tab should not produce JS errors
+    page = browser_page
+    errors = []
+    page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    _load_app_with_data(page, live_server)
+    for view in ["dashboard", "collect", "classify", "explore", "briefing", "trends", "qa"]:
+        page.click(f'.tab[data-view="{view}"]')
+        page.wait_for_timeout(200)
+    assert errors == [], f"console/page errors: {errors}"
+
+
+def test_no_horizontal_overflow_three_viewports(live_server, browser_page):
+    # Guard: no horizontal scrollbar at desktop, tablet, or mobile widths
+    page = browser_page
+    for width, height in [(1440, 900), (768, 1024), (375, 812)]:
+        page.set_viewport_size({"width": width, "height": height})
+        _load_app_with_data(page, live_server)
+        page.click('.tab[data-view="explore"]')
+        page.wait_for_timeout(300)
+        # scrollWidth > clientWidth + 1 means real overflow (1px tolerance for rounding)
+        overflow = page.evaluate(
+            "() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1"
+        )
+        assert not overflow, f"horizontal overflow at {width}px"
