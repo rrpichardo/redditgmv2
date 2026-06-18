@@ -152,6 +152,32 @@ class TrendBriefingRequest(BaseModel):
     api_key: str = ""
 
 
+class QaBuildIndexRequest(BaseModel):
+    tag: str = DEFAULT_TAG
+    provider: str = "openrouter"
+    model: str = ""
+    api_key: str = ""
+    embedding_model: str = "text-embedding-3-small"
+
+
+class QaSearchRequest(BaseModel):
+    tag: str = DEFAULT_TAG
+    query: str
+    provider: str = "openrouter"
+    model: str = ""
+    api_key: str = ""
+    k: int = 8
+
+
+class QaAnswerRequest(BaseModel):
+    tag: str = DEFAULT_TAG
+    question: str
+    provider: str = "openrouter"
+    model: str = ""
+    api_key: str = ""
+    k: int = 8
+
+
 def run_dir(tag: str) -> Path:
     return RUNTIME / clean_tag(tag)
 
@@ -1112,6 +1138,114 @@ def download_trend_pdf(tag: str = DEFAULT_TAG) -> Response:
         path, media_type="application/pdf",
         filename=f"{clean}_gm_trend_briefing.pdf",
     )
+
+
+@app.post("/api/qa/build-index")
+def qa_build_index(request: QaBuildIndexRequest) -> JSONResponse:
+    """Start a FAISS Q&A index build job. Returns existing job if one is running."""
+    tag = clean_tag(request.tag)
+    active = find_active_job(RUNTIME, tag, "faiss_qa")
+    if active:
+        return safe_json({**active, "started": False})
+    cpath = classified_path(tag)
+    if not cpath.exists():
+        raise HTTPException(
+            status_code=400,
+            detail="No classified CSV found for this tag. Run classification first.",
+        )
+    pcfg = provider_config(request.provider, request.model, request.api_key)
+    env: dict[str, str] = {}
+    if request.api_key:
+        env[pcfg.api_key_env] = request.api_key
+    extra_args = [
+        "--classified_path", str(cpath),
+        "--embedding_model", request.embedding_model,
+        "--provider", pcfg.provider,
+        "--base_url", pcfg.base_url,
+        "--model", pcfg.model,
+        "--api_key_env", pcfg.api_key_env,
+    ]
+    status = start_job(
+        RUNTIME, tag, "faiss_qa",
+        ROOT / "scripts" / "faiss_qa_job.py",
+        extra_args,
+        env=env,
+        cwd=ROOT,
+    )
+    return safe_json({**status, "started": True})
+
+
+@app.get("/api/qa/status")
+def qa_status(tag: str = DEFAULT_TAG, job_id: str = "") -> JSONResponse:
+    """Return the most recent Q&A index build job status."""
+    tag = clean_tag(tag)
+    if job_id:
+        status = read_status(job_path(RUNTIME, tag, job_id))
+    else:
+        status = find_active_job(RUNTIME, tag, "faiss_qa")
+        if not status:
+            d = RUNTIME / tag / "jobs"
+            if d.exists():
+                all_jobs = [
+                    s for p in d.glob("*.json")
+                    if (s := read_status(p)) and s.get("kind") == "faiss_qa"
+                ]
+                if all_jobs:
+                    status = max(all_jobs, key=lambda s: float(s.get("started_at", 0)))
+    if not status:
+        return safe_json({"state": "idle", "tag": tag})
+    return safe_json(status)
+
+
+@app.post("/api/qa/search")
+def qa_search(request: QaSearchRequest) -> JSONResponse:
+    """Return top-k retrieved evidence docs for a query (no LLM generation)."""
+    from src.qa_retrieval import load_qa_artifacts, retrieve
+    tag = clean_tag(request.tag)
+    if not request.query.strip():
+        raise HTTPException(status_code=400, detail="query must not be empty.")
+    try:
+        docs, index, metadata = load_qa_artifacts(RUNTIME, tag)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    pcfg = provider_config(request.provider, request.model, request.api_key)
+    if request.api_key:
+        os.environ[pcfg.api_key_env] = request.api_key
+    try:
+        hits = retrieve(
+            request.query, docs, index, pcfg,
+            model=metadata.get("model", "text-embedding-3-small"),
+            k=max(1, min(request.k, 20)),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Retrieval error: {exc}") from exc
+    return safe_json({"ok": True, "query": request.query, "hits": hits, "metadata": metadata})
+
+
+@app.post("/api/qa/answer")
+def qa_answer(request: QaAnswerRequest) -> JSONResponse:
+    """Retrieve evidence and generate an LLM-grounded answer."""
+    from src.qa_retrieval import answer_question, load_qa_artifacts, retrieve
+    tag = clean_tag(request.tag)
+    if not request.question.strip():
+        raise HTTPException(status_code=400, detail="question must not be empty.")
+    try:
+        docs, index, metadata = load_qa_artifacts(RUNTIME, tag)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    pcfg = provider_config(request.provider, request.model, request.api_key)
+    if request.api_key:
+        os.environ[pcfg.api_key_env] = request.api_key
+    try:
+        hits = retrieve(
+            request.question, docs, index, pcfg,
+            model=metadata.get("model", "text-embedding-3-small"),
+            k=max(1, min(request.k, 20)),
+        )
+        answer = answer_question(request.question, hits, pcfg)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Q&A error: {exc}") from exc
+    return safe_json({"ok": True, "question": request.question, "answer": answer, "hits": hits})
 
 
 @app.get("/api/health")
