@@ -3,7 +3,12 @@ const state = {
   view: "dashboard",
   data: null,
   report: "",
+  filters: {},
+  classifyJobStatus: null,
+  exportJobStatus: null,
   collectPollTimer: null,
+  classifyPollTimer: null,
+  exportPollTimer: null,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -23,6 +28,14 @@ const esc = (value) =>
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
+
+function debounce(fn, ms) {
+  let timer;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
+}
 
 function apiUrl(path, params = {}) {
   const url = new URL(path, window.location.origin);
@@ -80,6 +93,378 @@ function topItem(rows, labelKey, valueKey = "count") {
   return [...rows].sort((a, b) => Number(b[valueKey] || 0) - Number(a[valueKey] || 0))[0];
 }
 
+// ---------------------------------------------------------------------------
+// Filters
+// ---------------------------------------------------------------------------
+
+function buildFilterParams() {
+  const f = state.filters || {};
+  return {
+    sentiment: f.sentiment || [],
+    vehicle: f.vehicle || [],
+    subreddit: f.subreddit || [],
+    severity: f.severity || [],
+    comment_type: f.comment_type || [],
+    competitor: f.competitor || [],
+    search: f.search || "",
+    min_score: f.min_score || undefined,
+  };
+}
+
+function hasActiveFilters() {
+  const f = state.filters || {};
+  return (
+    (f.sentiment?.length || 0) +
+    (f.vehicle?.length || 0) +
+    (f.subreddit?.length || 0) +
+    (f.severity?.length || 0) +
+    (f.comment_type?.length || 0) +
+    (f.competitor?.length || 0) +
+    (f.search ? 1 : 0) +
+    (f.min_score ? 1 : 0)
+  ) > 0;
+}
+
+function filterPanel() {
+  const opts = state.data?.filterOptions || {};
+  const f = state.filters || {};
+  if (!Object.keys(opts).length) return "";
+
+  const sel = (key, label, options, apiKey = key) => {
+    const selected = f[apiKey] || [];
+    const opts_html = options.map((o) =>
+      `<option value="${esc(o)}" ${selected.includes(o) ? "selected" : ""}>${esc(o)}</option>`
+    ).join("");
+    return `<div class="filter-control">
+      <label class="filter-label">${esc(label)}</label>
+      <select id="filter-${key}" multiple size="3" class="filter-select" data-filter-key="${esc(apiKey)}">${opts_html}</select>
+    </div>`;
+  };
+
+  const activeCount = hasActiveFilters() ? ` (${Object.values(state.filters).flat().filter(Boolean).length} active)` : "";
+  return `<section class="panel filter-panel">
+    <div class="panel-head">
+      <h3>Filters${activeCount ? `<span class="filter-active-badge">${activeCount}</span>` : ""}</h3>
+      <button id="clearFiltersBtn" class="button secondary small">Clear all</button>
+    </div>
+    <div class="filter-grid">
+      ${opts.sentiment?.length ? sel("sentiment", "Sentiment", opts.sentiment) : ""}
+      ${opts.vehicle?.length ? sel("vehicle", "Vehicle", opts.vehicle) : ""}
+      ${opts.subreddit?.length ? sel("subreddit", "Subreddit", opts.subreddit) : ""}
+      ${opts.severity?.length ? sel("severity", "Severity", opts.severity) : ""}
+      ${opts.commentType?.length ? sel("commentType", "Comment type", opts.commentType, "comment_type") : ""}
+      ${opts.competitor?.length ? sel("competitor", "Competitor", opts.competitor) : ""}
+      <div class="filter-control">
+        <label class="filter-label">Search text</label>
+        <input id="filter-search" type="text" class="filter-input" value="${esc(f.search || "")}" placeholder="keyword…">
+      </div>
+      <div class="filter-control">
+        <label class="filter-label">Min score</label>
+        <input id="filter-minscore" type="number" class="filter-input" value="${f.min_score || ""}" placeholder="0">
+      </div>
+    </div>
+  </section>`;
+}
+
+function bindFilterEvents() {
+  $$(".filter-select").forEach((sel) => {
+    sel.addEventListener("change", applyFilters);
+  });
+  const searchInput = $("#filter-search");
+  if (searchInput) {
+    searchInput.addEventListener("input", debounce(applyFilters, 420));
+  }
+  $("#filter-minscore")?.addEventListener("change", applyFilters);
+  $("#clearFiltersBtn")?.addEventListener("click", clearFilters);
+}
+
+function applyFilters() {
+  const f = {};
+  $$(".filter-select").forEach((sel) => {
+    const key = sel.dataset.filterKey || sel.id.replace("filter-", "");
+    const values = Array.from(sel.selectedOptions).map((o) => o.value);
+    if (values.length) f[key] = values;
+  });
+  const searchEl = $("#filter-search");
+  if (searchEl?.value.trim()) f.search = searchEl.value.trim();
+  const minEl = $("#filter-minscore");
+  if (minEl?.value) f.min_score = parseFloat(minEl.value);
+  state.filters = f;
+  loadRun();
+}
+
+function clearFilters() {
+  state.filters = {};
+  loadRun();
+}
+
+// ---------------------------------------------------------------------------
+// Chart renderers (Phase 3 — consume chart_specs + chart_data)
+// ---------------------------------------------------------------------------
+
+function formatValue(value, format) {
+  const n = Number(value || 0);
+  switch (format) {
+    case "pct": return pct(n);
+    case "count_pct": return fmt.format(Math.round(n));
+    case "score": return n.toFixed(1);
+    case "correlation": return n.toFixed(2);
+    default: return fmt.format(Math.round(n));
+  }
+}
+
+function renderChart(id) {
+  const spec = state.data?.chart_specs?.[id];
+  const rawData = state.data?.chart_data?.[id];
+  if (!spec) return `<div class="notice">Chart spec not found: ${esc(id)}.</div>`;
+
+  const rows = Array.isArray(rawData) ? rawData : [];
+  const minRows = spec.minimum_rows ?? 1;
+
+  // Check minimum_rows for list-based charts
+  if (spec.type !== "heatmap" && rows.length < minRows) {
+    return `<div class="notice">${esc(spec.fallback || "Insufficient data.")}</div>`;
+  }
+
+  let chart;
+  switch (spec.type) {
+    case "bar":            chart = renderBarChart(spec, rows); break;
+    case "stacked_bar":    chart = renderStackedBarLong(spec, rows); break;
+    case "stacked_bar_100": chart = renderStackedBarWide(spec, rows); break;
+    case "grouped_bar":    chart = renderGroupedBar(spec, rows); break;
+    case "scatter":        chart = scatter(rows); break;
+    case "heatmap":        chart = renderHeatmapChart(spec, rawData); break;
+    default:               chart = renderCompactTable(rows);
+  }
+
+  const note = spec.quality_note
+    ? `<small class="chart-note">${esc(spec.quality_note)}</small>`
+    : "";
+  return note ? `${chart}${note}` : chart;
+}
+
+function renderBarChart(spec, rows) {
+  const xField = spec.x_field || Object.keys(rows[0] || {})[0] || "label";
+  const yField = spec.y_field || "count";
+  const colorMap = spec.color_map || {};
+  const max = Math.max(...rows.map((r) => Number(r[yField] || 0)), 1);
+
+  return `<div class="bar-list">${rows.slice(0, 20).map((row) => {
+    const label = humanLabel(row[xField]);
+    const value = Number(row[yField] || 0);
+    const color = colorMap[String(row[xField] || "")] || "var(--blue)";
+    return `<div class="bar-row">
+      <strong title="${esc(label)}">${esc(label)}</strong>
+      <div class="bar-track" aria-hidden="true">
+        <div class="bar-fill" style="width:${(value / max) * 100}%;background:${color}"></div>
+      </div>
+      <span class="bar-value">${formatValue(value, spec.value_format)}</span>
+    </div>`;
+  }).join("")}</div>`;
+}
+
+function renderStackedBarLong(spec, rows) {
+  // Long format: [{vehicle_mentioned: str, issue_severity: str, count: int}, ...]
+  const xField = spec.x_field || "vehicle_mentioned";
+  const seriesField = spec.series_field || "issue_severity";
+  const valueField = spec.value_field || "count";
+  const seriesOrder = spec.series_order || [];
+  const colorMap = spec.color_map || {};
+
+  // Pivot to groups
+  const groups = {};
+  const allSeries = new Set(seriesOrder);
+  for (const row of rows) {
+    const x = String(row[xField] || "");
+    const s = String(row[seriesField] || "");
+    const v = Number(row[valueField] || 0);
+    if (!groups[x]) groups[x] = {};
+    groups[x][s] = (groups[x][s] || 0) + v;
+    allSeries.add(s);
+  }
+  const series = [
+    ...seriesOrder,
+    ...[...allSeries].filter((s) => !seriesOrder.includes(s)),
+  ];
+
+  const entries = Object.entries(groups);
+  if (!entries.length) return `<div class="notice">${esc(spec.fallback || "No data.")}</div>`;
+
+  return `<div class="bar-list stacked-bar-list">${entries.map(([x, vals]) => {
+    const total = series.reduce((a, s) => a + (vals[s] || 0), 0) || 1;
+    const segs = series.filter((s) => vals[s] > 0).map((s) => {
+      const v = vals[s] || 0;
+      const w = ((v / total) * 100).toFixed(1);
+      const color = colorMap[s] || "var(--blue)";
+      return `<div class="stacked-seg" style="width:${w}%;background:${color}" title="${esc(s)}: ${v}"></div>`;
+    }).join("");
+    return `<div class="bar-row">
+      <strong title="${esc(humanLabel(x))}">${esc(humanLabel(x))}</strong>
+      <div class="stacked-track">${segs}</div>
+      <span class="bar-value">${fmt.format(total)}</span>
+    </div>`;
+  }).join("")}</div>`;
+}
+
+function renderStackedBarWide(spec, rows) {
+  // Wide format: [{vehicle: str, category1: int, ...}, ...]
+  const xField = spec.x_field || "vehicle";
+  const seriesOrder = spec.series_order || [];
+  const colorMap = spec.color_map || {};
+  if (!rows.length) return `<div class="notice">${esc(spec.fallback || "No data.")}</div>`;
+
+  const allKeys = Object.keys(rows[0]).filter((k) => k !== xField);
+  const series = [
+    ...seriesOrder.filter((s) => allKeys.includes(s)),
+    ...allKeys.filter((s) => !seriesOrder.includes(s)),
+  ];
+
+  return `<div class="bar-list stacked-bar-list">${rows.slice(0, 15).map((row) => {
+    const xVal = String(row[xField] || "");
+    const total = series.reduce((a, s) => a + Number(row[s] || 0), 0) || 1;
+    const segs = series.map((s) => {
+      const v = Number(row[s] || 0);
+      if (v <= 0) return "";
+      const w = ((v / total) * 100).toFixed(1);
+      const color = colorMap[s] || "var(--blue)";
+      return `<div class="stacked-seg" style="width:${w}%;background:${color}" title="${esc(humanLabel(s))}: ${v}"></div>`;
+    }).join("");
+    return `<div class="bar-row">
+      <strong title="${esc(humanLabel(xVal))}">${esc(humanLabel(xVal))}</strong>
+      <div class="stacked-track">${segs}</div>
+      <span class="bar-value">${fmt.format(Math.round(total))}</span>
+    </div>`;
+  }).join("")}</div>`;
+}
+
+function renderGroupedBar(spec, rows) {
+  // Wide format: [{powertrain: str, metric1: float, ...}, ...]
+  const xField = spec.x_field || "label";
+  const seriesKeys = spec.series_keys || [];
+  if (!rows.length || !seriesKeys.length) {
+    return `<div class="notice">${esc(spec.fallback || "No data.")}</div>`;
+  }
+  const allVals = rows.flatMap((r) => seriesKeys.map((k) => Number(r[k] || 0)));
+  const maxVal = Math.max(...allVals, 1);
+  const colors = ["var(--blue)", "var(--teal)", "var(--amber)", "var(--red)", "var(--violet)"];
+
+  return `<div class="grouped-bar-list">${rows.slice(0, 8).map((row) => {
+    const label = humanLabel(String(row[xField] || ""));
+    const subBars = seriesKeys.map((key, i) => {
+      const v = Number(row[key] || 0);
+      const w = ((v / maxVal) * 100).toFixed(1);
+      return `<div class="bar-row sub-bar-row">
+        <span class="bar-sub-label">${esc(humanLabel(key))}</span>
+        <div class="bar-track"><div class="bar-fill" style="width:${w}%;background:${colors[i % colors.length]}"></div></div>
+        <span class="bar-value">${formatValue(v, spec.value_format)}</span>
+      </div>`;
+    }).join("");
+    return `<div class="grouped-group">
+      <strong class="group-label">${esc(label)}</strong>
+      ${subBars}
+    </div>`;
+  }).join("")}</div>`;
+}
+
+function renderHeatmapChart(spec, data) {
+  if (!data) {
+    return `<div class="notice">${esc(spec.fallback || "No heatmap data.")}</div>`;
+  }
+
+  // category_by_model format: {rows, columns, values}
+  if (data.rows !== undefined && data.columns !== undefined) {
+    const { rows, columns, values } = data;
+    if (!rows.length || !columns.length) {
+      return `<div class="notice">${esc(spec.fallback || "No data.")}</div>`;
+    }
+    const maxVal = Math.max(...values.flat().map((v) => v || 0), 1);
+    const hdrs = `<tr><th></th>${columns.map((c) =>
+      `<th title="${esc(c)}">${esc(humanLabel(c).slice(0, 14))}</th>`
+    ).join("")}</tr>`;
+    const body = rows.map((row, i) => {
+      const cells = columns.map((_, j) => {
+        const v = values[i]?.[j];
+        if (v === null || v === undefined) return `<td class="hm-empty">—</td>`;
+        const alpha = Math.min(0.85, (Number(v) / maxVal) * 0.85 + 0.12).toFixed(2);
+        return `<td style="background:rgba(157,45,37,${alpha})" title="${v}">${v}</td>`;
+      }).join("");
+      return `<tr><th>${esc(humanLabel(row))}</th>${cells}</tr>`;
+    }).join("");
+    return `<div class="heatmap-wrap"><table class="heatmap-table"><thead>${hdrs}</thead><tbody>${body}</tbody></table></div>`;
+  }
+
+  // cooccurrence: dict-of-dicts
+  if (typeof data === "object" && Object.keys(data).length > 0) {
+    const cols = Object.keys(data);
+    const hdrs = `<tr><th></th>${cols.map((c) =>
+      `<th title="${esc(c)}">${esc(humanLabel(c).slice(0, 10))}</th>`
+    ).join("")}</tr>`;
+    const body = cols.map((row) => {
+      const cells = cols.map((col) => {
+        const v = data[row]?.[col];
+        if (v === null || v === undefined) return "<td>—</td>";
+        const n = Number(v) || 0;
+        const bg =
+          n > 0.5 ? `rgba(22,96,68,${Math.min(0.75, n * 0.75).toFixed(2)})`
+          : n < -0.3 ? `rgba(157,45,37,${Math.min(0.55, Math.abs(n) * 0.55).toFixed(2)})`
+          : "transparent";
+        return `<td style="background:${bg}">${n.toFixed(2)}</td>`;
+      }).join("");
+      return `<tr><th>${esc(humanLabel(row).slice(0, 12))}</th>${cells}</tr>`;
+    }).join("");
+    return `<div class="heatmap-wrap"><table class="heatmap-table"><thead>${hdrs}</thead><tbody>${body}</tbody></table></div>`;
+  }
+
+  return `<div class="notice">${esc(spec.fallback || "No heatmap data.")}</div>`;
+}
+
+function renderCompactTable(rows) {
+  if (!rows?.length) return `<div class="notice">No data.</div>`;
+  const keys = Object.keys(rows[0] || {}).slice(0, 6);
+  const hdrs = keys.map((k) => `<th>${esc(k)}</th>`).join("");
+  const body = rows.slice(0, 20).map((row) =>
+    `<tr>${keys.map((k) => `<td>${esc(String(row[k] ?? ""))}</td>`).join("")}</tr>`
+  ).join("");
+  return `<div class="table-wrap"><table><thead><tr>${hdrs}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Job status UI
+// ---------------------------------------------------------------------------
+
+function jobStatusCard(status) {
+  if (!status) return `<div class="notice">No active job.</div>`;
+  const st = status.state || "unknown";
+  const total = Number(status.total || 0);
+  const processed = Number(status.processed || 0);
+  const pctDone = total > 0 ? Math.round((processed / total) * 100) : 0;
+  const stateClass = st === "completed" ? "success" : st === "failed" ? "error" : "running";
+  const progressBar = total > 0
+    ? `<div class="job-progress-track"><div class="job-progress-fill" style="width:${pctDone}%"></div></div>`
+    : "";
+  const errSpan = status.errors ? `<span class="error-chip">${status.errors} errors</span>` : "";
+  const artifacts = (status.artifact_paths || []).map((p) => {
+    const name = p.split("/").pop();
+    return `<span class="artifact-chip" title="${esc(p)}">${esc(name)}</span>`;
+  }).join("");
+
+  return `<div class="job-status-card ${stateClass}">
+    <div class="job-status-header">
+      <span class="job-state-badge">${esc(st)}</span>
+      <span class="job-kind-badge">${esc(status.kind || "")}</span>
+      ${errSpan}
+    </div>
+    ${progressBar}
+    ${total > 0 ? `<div class="job-meta">${processed} / ${total} rows${pctDone > 0 ? ` (${pctDone}%)` : ""}</div>` : ""}
+    ${artifacts ? `<div class="job-artifacts">${artifacts}</div>` : ""}
+    ${status.error ? `<div class="notice error" style="margin-top:0.5rem">${esc(status.error)}</div>` : ""}
+  </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Collect polling
+// ---------------------------------------------------------------------------
+
 function collectProgressText(status) {
   const done = Number(status?.completed_subreddits || 0);
   const total = Number(status?.total_subreddits || 0);
@@ -127,22 +512,41 @@ function updateCollectUi(status) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Main data load
+// ---------------------------------------------------------------------------
+
 async function loadRun() {
   state.tag = $("#tagInput").value.trim() || "gm_vehicle_on_demand";
   setNotice("Loading run...");
   try {
-    state.data = await request(apiUrl("/api/run", { tag: state.tag }));
-    const collectStatus = await request(apiUrl("/api/collect/status", { tag: state.tag })).catch(() => null);
+    const params = buildFilterParams();
+    state.data = await request(apiUrl("/api/run", { tag: state.tag, ...params }));
+
+    const collectStatus = await request(
+      apiUrl("/api/collect/status", { tag: state.tag })
+    ).catch(() => null);
+
     if (collectStatus?.status === "running") {
       $("#collectorStatus").textContent = `running ${collectProgressText(collectStatus)}`;
     } else {
-      $("#collectorStatus").textContent = state.data.status.legacy_collector_found ? "ready" : "missing";
+      $("#collectorStatus").textContent = state.data.status.legacy_collector_found
+        ? "ready"
+        : "missing";
     }
-    $("#runSubtitle").textContent = `${state.data.tag} / ${fmt.format(state.data.summary.metrics.total_rows)} rows / ${fmt.format(state.data.summary.metrics.analyzed_rows)} analyzed / ${state.data.status.has_classified ? "classified" : "source only"}`;
-    $("#railRows").textContent = `${fmt.format(state.data.summary.metrics.total_rows)} total`;
+
+    const analyzed = state.data.summary.metrics.analyzed_rows ?? 0;
+    const total = state.data.summary.metrics.total_rows ?? 0;
+    const filterNote = hasActiveFilters() ? " [filtered]" : "";
+    $("#runSubtitle").textContent =
+      `${state.data.tag} / ${fmt.format(total)} rows / ${fmt.format(analyzed)} analyzed / ` +
+      `${state.data.status.has_classified ? "classified" : "source only"}${filterNote}`;
+    $("#railRows").textContent = `${fmt.format(total)} total`;
     $("#railExports").textContent = state.data.status.has_source ? "ready" : "empty";
+
     updateDownloads();
     render();
+
     if (collectStatus?.status === "running") {
       updateCollectUi(collectStatus);
       startCollectPolling(collectStatus.job_id);
@@ -162,9 +566,7 @@ function updateDownloads() {
   const saveZip = $("#saveZipBtn");
   const hasSource = Boolean(state.data?.status.has_source);
 
-  if (saveZip) {
-    saveZip.disabled = !hasSource;
-  }
+  if (saveZip) saveZip.disabled = !hasSource;
   if (sourceZip) {
     sourceZip.href = `/api/download/source?tag=${encodeURIComponent(state.tag)}&kind=all`;
     sourceZip.setAttribute("aria-disabled", hasSource ? "false" : "true");
@@ -173,11 +575,19 @@ function updateDownloads() {
     combined.href = `/api/download/source?tag=${encodeURIComponent(state.tag)}&kind=combined`;
     combined.setAttribute("aria-disabled", hasSource ? "false" : "true");
   }
-  classified.href = `/api/download/classified?tag=${encodeURIComponent(state.tag)}`;
-  report.href = `/api/download/report?tag=${encodeURIComponent(state.tag)}`;
-  classified.setAttribute("aria-disabled", state.data?.status.has_classified ? "false" : "true");
-  report.setAttribute("aria-disabled", state.data?.status.has_report ? "false" : "true");
+  if (classified) {
+    classified.href = `/api/download/classified?tag=${encodeURIComponent(state.tag)}`;
+    classified.setAttribute("aria-disabled", state.data?.status.has_classified ? "false" : "true");
+  }
+  if (report) {
+    report.href = `/api/download/report?tag=${encodeURIComponent(state.tag)}`;
+    report.setAttribute("aria-disabled", state.data?.status.has_report ? "false" : "true");
+  }
 }
+
+// ---------------------------------------------------------------------------
+// Views
+// ---------------------------------------------------------------------------
 
 function setView(view) {
   state.view = view;
@@ -201,66 +611,46 @@ function metricGrid(metrics) {
     ["Competitor signal", pct(metrics.competitor_rate), "mentions outside GM", "rival"],
     ["EV topic mix", pct(metrics.ev_rate), "EV-related rows", "ev"],
   ];
-  return `<div class="metric-grid">${cards
-    .map(([label, value, note, tone]) => `<article class="metric-card tone-${tone}">
+  return `<div class="metric-grid">${cards.map(([label, value, note, tone]) =>
+    `<article class="metric-card tone-${tone}">
       <span>${label}</span>
       <strong>${value}</strong>
       <small>${note}</small>
-    </article>`)
-    .join("")}</div>`;
+    </article>`
+  ).join("")}</div>`;
 }
 
+// Legacy simple bar chart (still used on dashboard)
 function bars(rows, labelKey, valueKey = "count", color = "var(--blue)") {
   if (!rows?.length) return `<div class="notice">No data for this view.</div>`;
   const max = Math.max(...rows.map((row) => Number(row[valueKey] || 0)), 1);
-  return `<div class="bar-list">${rows
-    .map((row) => {
-      const value = Number(row[valueKey] || 0);
-      return `<div class="bar-row">
-        <strong>${esc(humanLabel(row[labelKey]))}</strong>
-        <div class="bar-track" aria-hidden="true"><div class="bar-fill" style="width:${(value / max) * 100}%;background:${color}"></div></div>
-        <span class="bar-value">${fmt.format(value)}</span>
-      </div>`;
-    })
-    .join("")}</div>`;
+  return `<div class="bar-list">${rows.map((row) => {
+    const value = Number(row[valueKey] || 0);
+    return `<div class="bar-row">
+      <strong>${esc(humanLabel(row[labelKey]))}</strong>
+      <div class="bar-track" aria-hidden="true">
+        <div class="bar-fill" style="width:${(value / max) * 100}%;background:${color}"></div>
+      </div>
+      <span class="bar-value">${fmt.format(value)}</span>
+    </div>`;
+  }).join("")}</div>`;
 }
 
 function panel(title, body, note = "", className = "") {
-  return `<section class="panel ${esc(className)}"><div class="panel-head"><h3>${esc(title)}</h3>${note ? `<small>${esc(note)}</small>` : ""}</div>${body}</section>`;
-}
-
-function dashboard() {
-  const data = state.data;
-  if (!data?.summary.metrics.total_rows) return emptyState();
-  const charts = data.charts;
-  const topTheme = topItem(charts.complaints, "theme");
-  const topVehicle = topItem(charts.vehicles, "vehicle_mentioned", "comment_count");
-  return `
-    <section class="readout-deck">
-      <div>
-        ${metricGrid(data.summary.metrics)}
-      </div>
-      <aside class="run-card">
-        <span class="micro-label">Run focus</span>
-        <strong>${esc(topTheme ? humanLabel(topTheme.theme) : "No dominant complaint")}</strong>
-        <p>${esc(topVehicle ? `${humanLabel(topVehicle.vehicle_mentioned)} has the largest visible sample.` : "Collect or classify more rows to build a stronger issue map.")}</p>
-        <div class="run-card-actions">
-          <button class="button primary" type="button" data-save-export>Save ZIP</button>
-          <button class="button secondary" type="button" data-jump="collect">Collect</button>
-        </div>
-      </aside>
-    </section>
-    <div class="panel-grid">
-      ${panel("Sentiment distribution", bars(charts.sentiment, "sentiment", "count", "var(--green)"))}
-      ${panel("Signal flags", bars(charts.flags.slice(0, 8), "flag", "count", "var(--blue)"))}
-      ${panel("Complaint themes", bars(charts.complaints.slice(0, 8), "theme", "count", "var(--amber)"))}
+  return `<section class="panel ${esc(className)}">
+    <div class="panel-head">
+      <h3>${esc(title)}</h3>
+      ${note ? `<small>${esc(note)}</small>` : ""}
     </div>
-    <div class="panel-grid two">
-      ${panel("Priority map", scatter(charts.priority), "volume x negativity", "priority-panel")}
-      ${panel("Evidence feed", evidenceFeed(data.evidence.slice(0, 8)), "latest matched rows", "evidence-panel")}
-    </div>`;
+    ${body}
+  </section>`;
 }
 
+function chartPanel(id, title, note = "") {
+  return panel(title, renderChart(id), note, "chart-panel");
+}
+
+// Priority scatter (shared between dashboard and explore)
 function scatter(rows) {
   if (!rows?.length) return `<div class="notice">No complaint priorities yet.</div>`;
   const width = 720;
@@ -269,22 +659,22 @@ function scatter(rows) {
   const plotted = rows.slice(0, 12);
   const maxX = Math.max(...plotted.map((row) => Number(row.volume || 0)), 1);
   const maxY = Math.max(...plotted.map((row) => Number(row.pct_negative || 0)), 100);
-  const points = plotted
-    .map((row) => {
-      const x = pad + (Number(row.volume || 0) / maxX) * (width - pad * 2);
-      const y = height - pad - (Number(row.pct_negative || 0) / maxY) * (height - pad * 2);
-      const radius = Math.max(7, Math.min(24, Number(row.volume || 1) * 4));
-      const fill = row.priority === "Fix now" ? "#c2413b" : row.priority === "Monitor" ? "#d97706" : "#1e40af";
-      return `<g tabindex="0" aria-label="${esc(row.theme)} ${row.volume} complaints ${row.pct_negative} percent negative">
-        <circle cx="${x}" cy="${y}" r="${radius}" fill="${fill}" opacity="0.78"></circle>
-        <title>${esc(humanLabel(row.theme))}: ${fmt.format(row.volume || 0)} complaints, ${pct(row.pct_negative)}</title>
-      </g>`;
-    })
-    .join("");
-  const legend = plotted
-    .slice(0, 6)
-    .map((row) => `<li><strong>${esc(humanLabel(row.theme))}</strong><span>${fmt.format(row.volume || 0)} / ${pct(row.pct_negative)}</span></li>`)
-    .join("");
+  const points = plotted.map((row) => {
+    const x = pad + (Number(row.volume || 0) / maxX) * (width - pad * 2);
+    const y = height - pad - (Number(row.pct_negative || 0) / maxY) * (height - pad * 2);
+    const radius = Math.max(7, Math.min(24, Number(row.volume || 1) * 4));
+    const fill =
+      row.priority === "Fix now" ? "#c2413b"
+      : row.priority === "Monitor" ? "#d97706"
+      : "#1e40af";
+    return `<g tabindex="0" aria-label="${esc(row.theme)} ${row.volume} complaints ${row.pct_negative} percent negative">
+      <circle cx="${x}" cy="${y}" r="${radius}" fill="${fill}" opacity="0.78"></circle>
+      <title>${esc(humanLabel(row.theme))}: ${fmt.format(row.volume || 0)} complaints, ${pct(row.pct_negative)}</title>
+    </g>`;
+  }).join("");
+  const legend = plotted.slice(0, 6).map((row) =>
+    `<li><strong>${esc(humanLabel(row.theme))}</strong><span>${fmt.format(row.volume || 0)} / ${pct(row.pct_negative)}</span></li>`
+  ).join("");
   return `<div class="priority-map">
     <svg class="chart-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Complaint priority matrix">
       <rect x="${pad}" y="${pad}" width="${width - pad * 2}" height="${height - pad * 2}" rx="10"></rect>
@@ -302,20 +692,22 @@ function scatter(rows) {
 
 function evidenceFeed(rows) {
   if (!rows?.length) return `<div class="notice">No evidence rows for this view.</div>`;
-  return `<div class="evidence-feed">${rows
-    .map((row) => `<article class="evidence-item">
+  return `<div class="evidence-feed">${rows.map((row) =>
+    `<article class="evidence-item">
       <div class="evidence-meta">
         <span>${esc(row.created_at_norm || "")}</span>
         <span>r/${esc(row.subreddit_norm || "unknown")}</span>
         <span>${esc(row.sentiment || "unlabeled")}</span>
       </div>
-      <a href="${esc(row.permalink_norm || "#")}" target="_blank" rel="noreferrer">${esc(row.description || row.title_norm || "No text available")}</a>
+      <a href="${esc(row.permalink_norm || "#")}" target="_blank" rel="noreferrer">
+        ${esc(row.description || row.title_norm || "No text available")}
+      </a>
       <div class="evidence-tags">
         <span>${esc(humanLabel(row.vehicle_mentioned))}</span>
         <span>${esc(humanLabel(row.top_complaint_category))}</span>
       </div>
-    </article>`)
-    .join("")}</div>`;
+    </article>`
+  ).join("")}</div>`;
 }
 
 function evidenceTable(rows) {
@@ -323,19 +715,19 @@ function evidenceTable(rows) {
   const headers = ["date", "subreddit", "vehicle", "sentiment", "theme", "score", "description"];
   return `<div class="table-wrap"><table>
     <thead><tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead>
-    <tbody>${rows
-      .map(
-        (row) => `<tr>
-          <td>${esc(row.created_at_norm || "")}</td>
-          <td>${esc(row.subreddit_norm || "")}</td>
-          <td>${esc(row.vehicle_mentioned || "")}</td>
-          <td>${esc(row.sentiment || "")}</td>
-          <td>${esc(row.top_complaint_category || "")}</td>
-          <td>${esc(row.score_norm || "")}</td>
-          <td>${row.permalink_norm ? `<a href="${esc(row.permalink_norm)}" target="_blank" rel="noreferrer">${esc(row.description || row.title_norm || "")}</a>` : esc(row.description || row.title_norm || "")}</td>
-        </tr>`
-      )
-      .join("")}</tbody>
+    <tbody>${rows.map((row) =>
+      `<tr>
+        <td>${esc(row.created_at_norm || "")}</td>
+        <td>${esc(row.subreddit_norm || "")}</td>
+        <td>${esc(row.vehicle_mentioned || "")}</td>
+        <td>${esc(row.sentiment || "")}</td>
+        <td>${esc(row.top_complaint_category || "")}</td>
+        <td>${esc(row.score_norm || "")}</td>
+        <td>${row.permalink_norm
+          ? `<a href="${esc(row.permalink_norm)}" target="_blank" rel="noreferrer">${esc(row.description || row.title_norm || "")}</a>`
+          : esc(row.description || row.title_norm || "")}</td>
+      </tr>`
+    ).join("")}</tbody>
   </table></div>`;
 }
 
@@ -350,16 +742,62 @@ function sourceDownloadsPanel() {
     ["comments", "Comments CSV", fileMap.comments?.exists, fileSize(fileMap.comments?.bytes)],
   ];
   return `<section class="panel download-panel">
-    <div class="panel-head"><h2>Exports</h2><small>${hasSource ? `${fmt.format(state.data.summary.metrics.total_rows)} rows loaded` : "no source rows"}</small></div>
-    <div class="field-row flush"><button id="saveZipPanelBtn" class="button primary" type="button" ${hasSource ? "" : "disabled"}>Save ZIP to Downloads</button></div>
-    <div class="download-grid">${items
-      .map(([kind, label, enabled, note]) => `<a class="download-tile" href="/api/download/source?tag=${encodeURIComponent(state.tag)}&kind=${kind}" aria-disabled="${enabled ? "false" : "true"}" data-save-kind="${kind}">
+    <div class="panel-head">
+      <h2>Exports</h2>
+      <small>${hasSource ? `${fmt.format(state.data.summary.metrics.total_rows)} rows loaded` : "no source rows"}</small>
+    </div>
+    <div class="field-row flush">
+      <button id="saveZipPanelBtn" class="button primary" type="button" ${hasSource ? "" : "disabled"}>Save ZIP to Downloads</button>
+    </div>
+    <div class="download-grid">${items.map(([kind, label, enabled, note]) =>
+      `<a class="download-tile" href="/api/download/source?tag=${encodeURIComponent(state.tag)}&kind=${kind}"
+          aria-disabled="${enabled ? "false" : "true"}" data-save-kind="${kind}">
         <strong>${esc(label)}</strong>
         <span>${esc(note)}</span>
-      </a>`)
-      .join("")}</div>
+      </a>`
+    ).join("")}</div>
   </section>`;
 }
+
+// ---------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------
+
+function dashboard() {
+  const data = state.data;
+  if (!data?.summary.metrics.total_rows) return emptyState();
+  const charts = data.charts;
+  const topTheme = topItem(charts.complaints, "theme");
+  const topVehicle = topItem(charts.vehicles, "vehicle_mentioned", "comment_count");
+  return `
+    <section class="readout-deck">
+      <div>${metricGrid(data.summary.metrics)}</div>
+      <aside class="run-card">
+        <span class="micro-label">Run focus</span>
+        <strong>${esc(topTheme ? humanLabel(topTheme.theme) : "No dominant complaint")}</strong>
+        <p>${esc(topVehicle
+          ? `${humanLabel(topVehicle.vehicle_mentioned)} has the largest visible sample.`
+          : "Collect or classify more rows to build a stronger issue map.")}</p>
+        <div class="run-card-actions">
+          <button class="button primary" type="button" data-save-export>Save ZIP</button>
+          <button class="button secondary" type="button" data-jump="collect">Collect</button>
+        </div>
+      </aside>
+    </section>
+    <div class="panel-grid">
+      ${panel("Sentiment distribution", bars(charts.sentiment, "sentiment", "count", "var(--green)"))}
+      ${panel("Signal flags", bars(charts.flags.slice(0, 8), "flag", "count", "var(--blue)"))}
+      ${panel("Complaint themes", bars(charts.complaints.slice(0, 8), "theme", "count", "var(--amber)"))}
+    </div>
+    <div class="panel-grid two">
+      ${panel("Priority map", scatter(charts.priority), "volume x negativity", "priority-panel")}
+      ${panel("Evidence feed", evidenceFeed(data.evidence.slice(0, 8)), "latest matched rows", "evidence-panel")}
+    </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Collect view
+// ---------------------------------------------------------------------------
 
 function collectView() {
   return `
@@ -367,14 +805,32 @@ function collectView() {
       <section class="panel collector-panel">
         <div class="panel-head"><h2>Collector</h2><small>append-only</small></div>
         <div class="form-grid">
-          <div class="control"><label for="collectSource">Source</label><select id="collectSource"><option value="gm">GM vehicle list</option><option value="competitor">Competitor list</option><option value="custom">Custom list</option></select></div>
-          <div class="control"><label for="listingLimit">Posts per subreddit</label><input id="listingLimit" type="number" min="1" max="500" value="100"></div>
-          <div class="control"><label for="commentsLimit">Comments per post</label><input id="commentsLimit" type="number" min="0" max="25" value="5"></div>
-          <div class="control"><label for="sinceDays">Since days</label><input id="sinceDays" type="number" min="0" max="3650" value="0"></div>
-          <div class="control wide"><label for="customSubs">Custom subreddits</label><textarea id="customSubs" placeholder="Silverado&#10;Chevy"></textarea></div>
-          <div class="control"><label for="dryRun">Dry run</label><select id="dryRun"><option value="false">No</option><option value="true">Yes</option></select></div>
+          <div class="control"><label for="collectSource">Source</label>
+            <select id="collectSource">
+              <option value="gm">GM vehicle list</option>
+              <option value="competitor">Competitor list</option>
+              <option value="custom">Custom list</option>
+            </select>
+          </div>
+          <div class="control"><label for="listingLimit">Posts per subreddit</label>
+            <input id="listingLimit" type="number" min="1" max="500" value="100">
+          </div>
+          <div class="control"><label for="commentsLimit">Comments per post</label>
+            <input id="commentsLimit" type="number" min="0" max="25" value="5">
+          </div>
+          <div class="control"><label for="sinceDays">Since days</label>
+            <input id="sinceDays" type="number" min="0" max="3650" value="0">
+          </div>
+          <div class="control wide"><label for="customSubs">Custom subreddits</label>
+            <textarea id="customSubs" placeholder="Silverado&#10;Chevy"></textarea>
+          </div>
+          <div class="control"><label for="dryRun">Dry run</label>
+            <select id="dryRun"><option value="false">No</option><option value="true">Yes</option></select>
+          </div>
         </div>
-        <div class="field-row"><button id="collectBtn" class="button primary">Run collector</button></div>
+        <div class="field-row">
+          <button id="collectBtn" class="button primary">Run collector</button>
+        </div>
         <div id="collectProgress" class="collector-progress" hidden></div>
         <pre id="collectLog" class="log-box" hidden></pre>
       </section>
@@ -382,60 +838,180 @@ function collectView() {
     </div>
     <section class="panel upload-panel">
       <div class="panel-head"><h2>Upload CSV</h2><small>collector or classified output</small></div>
-      <div class="field-row"><input id="uploadInput" type="file" accept=".csv"><button id="uploadBtn" class="button secondary">Load CSV</button></div>
+      <div class="field-row">
+        <input id="uploadInput" type="file" accept=".csv">
+        <button id="uploadBtn" class="button secondary">Load CSV</button>
+      </div>
     </section>`;
 }
 
+// ---------------------------------------------------------------------------
+// Classify view
+// ---------------------------------------------------------------------------
+
 function classifyView() {
   const metrics = state.data?.summary.metrics || {};
+  const jobStatus = state.classifyJobStatus;
+  const isRunning = jobStatus?.state === "running";
+
   return `
     <section class="panel classify-panel">
-      <div class="panel-head"><h2>Classify</h2><small>${fmt.format(metrics.total_rows || 0)} source rows</small></div>
+      <div class="panel-head">
+        <h2>Quick classify</h2>
+        <small>${fmt.format(metrics.total_rows || 0)} source rows</small>
+      </div>
       ${metricGrid(metrics)}
       <div class="field-row">
-        <label class="control" style="max-width:180px"><span>Rows</span><input id="classifyLimit" type="number" min="1" value="50"></label>
+        <label class="control" style="max-width:180px">
+          <span>Rows</span>
+          <input id="classifyLimit" type="number" min="1" value="50">
+        </label>
         <button id="previewClassifyBtn" class="button primary">Preview classify</button>
-        <button id="llmClassifyBtn" class="button secondary">LLM classify</button>
+        <button id="llmClassifyBtn" class="button secondary">LLM classify (inline)</button>
       </div>
     </section>
+
+    <section class="panel spaced">
+      <div class="panel-head">
+        <h2>Full-run LLM job</h2>
+        <small>durable background subprocess</small>
+      </div>
+      <p class="panel-desc">Classifies all pending rows via the configured LLM. Runs as a background job — safe to close the browser and return later.</p>
+      <div class="field-row">
+        <label class="control" style="max-width:130px">
+          <span>Row limit (0 = all)</span>
+          <input id="jobLimitInput" type="number" min="0" value="0">
+        </label>
+        <button id="startClassifyJobBtn" class="button primary" ${isRunning ? "disabled" : ""}>
+          ${isRunning ? "Job running…" : "Start classify job"}
+        </button>
+        <button id="refreshClassifyJobBtn" class="button secondary">Refresh status</button>
+      </div>
+      ${jobStatusCard(jobStatus)}
+    </section>
+
     <section class="panel spaced">
       <div class="panel-head"><h2>Evidence sample</h2><small>classification context</small></div>
       ${evidenceFeed((state.data?.evidence || []).slice(0, 10))}
     </section>`;
 }
 
+// ---------------------------------------------------------------------------
+// Explore view (uses new chart renderers + filters)
+// ---------------------------------------------------------------------------
+
 function exploreView() {
   if (!state.data?.summary.metrics.total_rows) return emptyState();
-  const charts = state.data.charts;
+
   return `
+    ${filterPanel()}
     ${metricGrid(state.data.summary.metrics)}
-    <div class="panel-grid two">
-      ${panel("Complaint priority", scatter(charts.priority))}
-      ${panel("EV comparison", bars(charts.ev, "powertrain", "complaint_rate_pct", "var(--teal)"), "complaint rate")}
+
+    <div class="chart-section">
+      <div class="panel-grid">
+        ${chartPanel("sentiment", "Sentiment distribution")}
+        ${chartPanel("severity_summary", "Severity summary")}
+        ${chartPanel("complaints", "Top complaint themes")}
+      </div>
+      <div class="panel-grid two">
+        ${panel("Priority map", scatter(state.data.chart_data?.priority || []), "volume × negativity", "priority-panel")}
+        ${chartPanel("flags", "Signal flags")}
+      </div>
     </div>
-    <div class="panel-grid two">
-      ${panel("Vehicles", bars(charts.vehicles.slice(0, 12), "vehicle_mentioned", "complaint_rate_pct", "var(--blue)"), "complaint rate")}
-      ${panel("Competitors", bars(charts.competitors, "brand", "count", "var(--red)"))}
+
+    <div class="chart-section">
+      <div class="chart-section-head"><h3>Vehicle breakdown</h3></div>
+      <div class="panel-grid two">
+        ${chartPanel("vehicles", "Vehicles — complaint rate")}
+        ${chartPanel("severity_by_model", "Severity by model")}
+      </div>
+      <div class="panel-grid two">
+        ${chartPanel("complaint_by_model", "Complaint mix by model")}
+        ${chartPanel("sentiment_by_model", "Sentiment by model")}
+      </div>
     </div>
+
+    <div class="chart-section">
+      <div class="chart-section-head"><h3>Context &amp; engagement</h3></div>
+      <div class="panel-grid">
+        ${chartPanel("engagement", "Engagement level")}
+        ${chartPanel("comment_type", "Comment type")}
+        ${chartPanel("engagement_weighted_themes", "Engagement-weighted themes")}
+      </div>
+    </div>
+
+    <div class="chart-section">
+      <div class="chart-section-head"><h3>EV &amp; competitors</h3></div>
+      <div class="panel-grid two">
+        ${chartPanel("ev", "EV comparison")}
+        ${chartPanel("competitor_breakdown", "Competitor breakdown")}
+      </div>
+      <div class="panel-grid two">
+        ${chartPanel("subreddit", "Subreddit breakdown")}
+        ${chartPanel("all_complaint_mentions", "All complaint mentions")}
+      </div>
+    </div>
+
     <section class="panel spaced">
-      <div class="panel-head"><h2>Matched evidence</h2><small>latest 200 rows</small></div>
+      <div class="panel-head"><h2>Evidence</h2><small>matched rows</small></div>
       ${evidenceTable(state.data.evidence)}
     </section>`;
 }
 
+// ---------------------------------------------------------------------------
+// Briefing + Exports view
+// ---------------------------------------------------------------------------
+
 function briefingView() {
+  const exportJob = state.exportJobStatus;
+  const isExporting = exportJob?.state === "running";
+  const tag = state.tag;
+  const hasClassified = Boolean(state.data?.status.has_classified);
+
   return `
     <section class="panel briefing-actions">
-      <div class="panel-head"><h2>Briefing</h2><small>markdown export</small></div>
+      <div class="panel-head"><h2>Narrative briefing</h2><small>markdown export</small></div>
       <div class="field-row">
         <button id="templateBriefBtn" class="button primary">Template briefing</button>
         <button id="llmBriefBtn" class="button secondary">LLM briefing</button>
       </div>
     </section>
+
+    <section class="panel spaced">
+      <div class="panel-head">
+        <h2>PDF exports</h2>
+        <small>charts ZIP or full briefing PDF</small>
+      </div>
+      <p class="panel-desc">Render all charts as PNGs and package as a ZIP, or combine with the narrative to produce a full briefing PDF. Requires classified data.</p>
+      <div class="field-row">
+        <button id="chartsZipBtn" class="button secondary" ${isExporting || !hasClassified ? "disabled" : ""}>
+          Export charts ZIP
+        </button>
+        <button id="briefingPdfBtn" class="button secondary" ${isExporting || !hasClassified ? "disabled" : ""}>
+          Export briefing PDF
+        </button>
+        <button id="refreshExportBtn" class="button secondary">Refresh status</button>
+      </div>
+      ${jobStatusCard(exportJob)}
+      <div class="field-row" style="margin-top:0.85rem">
+        <a id="downloadChartsLink" class="export-chip"
+           href="/api/download/charts?tag=${encodeURIComponent(tag)}"
+           aria-disabled="${hasClassified ? "false" : "true"}">Download charts ZIP</a>
+        <a id="downloadPdfLink" class="export-chip"
+           href="/api/download/briefing-pdf?tag=${encodeURIComponent(tag)}"
+           aria-disabled="${hasClassified ? "false" : "true"}">Download briefing PDF</a>
+      </div>
+      ${!hasClassified ? `<div class="notice" style="margin-top:0.5rem">Classify data first to enable PDF exports.</div>` : ""}
+    </section>
+
     <section class="panel spaced">
       <pre id="briefingText" class="briefing">${esc(state.report || "No briefing generated yet.")}</pre>
     </section>`;
 }
+
+// ---------------------------------------------------------------------------
+// Render dispatch
+// ---------------------------------------------------------------------------
 
 function render() {
   const root = $("#viewRoot");
@@ -450,6 +1026,10 @@ function render() {
   bindViewEvents();
 }
 
+// ---------------------------------------------------------------------------
+// Event bindings
+// ---------------------------------------------------------------------------
+
 function handleSaveKindClick(event) {
   const target = event.currentTarget;
   event.preventDefault();
@@ -461,20 +1041,36 @@ function bindViewEvents() {
   $$("[data-jump]").forEach((button) => button.addEventListener("click", () => setView(button.dataset.jump)));
   $$("[data-save-export]").forEach((button) => button.addEventListener("click", () => saveExport("all")));
   $$("#viewRoot [data-save-kind]").forEach((target) => target.addEventListener("click", handleSaveKindClick));
+
+  // Collect
   $("#collectBtn")?.addEventListener("click", collect);
   $("#saveZipPanelBtn")?.addEventListener("click", () => saveExport("all"));
   $("#uploadBtn")?.addEventListener("click", upload);
+
+  // Classify
   $("#previewClassifyBtn")?.addEventListener("click", previewClassify);
   $("#llmClassifyBtn")?.addEventListener("click", llmClassify);
+  $("#startClassifyJobBtn")?.addEventListener("click", startClassifyJob);
+  $("#refreshClassifyJobBtn")?.addEventListener("click", refreshClassifyJobStatus);
+
+  // Briefing / exports
   $("#templateBriefBtn")?.addEventListener("click", () => briefing(false));
   $("#llmBriefBtn")?.addEventListener("click", () => briefing(true));
+  $("#chartsZipBtn")?.addEventListener("click", () => startExportJob("charts"));
+  $("#briefingPdfBtn")?.addEventListener("click", () => startExportJob("briefing"));
+  $("#refreshExportBtn")?.addEventListener("click", refreshExportJobStatus);
+
+  // Filters (explore view)
+  bindFilterEvents();
 }
+
+// ---------------------------------------------------------------------------
+// Collect polling
+// ---------------------------------------------------------------------------
 
 function startCollectPolling(jobId = "") {
   clearCollectPolling();
-  state.collectPollTimer = window.setInterval(() => {
-    pollCollectStatus(jobId);
-  }, 1500);
+  state.collectPollTimer = window.setInterval(() => pollCollectStatus(jobId), 1500);
 }
 
 async function pollCollectStatus(jobId = "") {
@@ -493,6 +1089,155 @@ async function pollCollectStatus(jobId = "") {
     setNotice(error.message, "error");
   }
 }
+
+// ---------------------------------------------------------------------------
+// Classify job polling
+// ---------------------------------------------------------------------------
+
+function clearClassifyPolling() {
+  if (state.classifyPollTimer) {
+    window.clearInterval(state.classifyPollTimer);
+    state.classifyPollTimer = null;
+  }
+}
+
+function startClassifyPolling(jobId = "") {
+  clearClassifyPolling();
+  state.classifyPollTimer = window.setInterval(() => pollClassifyJobStatus(jobId), 2000);
+}
+
+async function pollClassifyJobStatus(jobId = "") {
+  try {
+    const params = jobId ? { tag: state.tag, job_id: jobId } : { tag: state.tag };
+    const status = await request(apiUrl("/api/classify/status", params));
+    state.classifyJobStatus = status;
+    if (state.view === "classify") render();
+    const done = ["completed", "failed", "interrupted"].includes(status.state);
+    if (done) {
+      clearClassifyPolling();
+      if (status.state === "completed") {
+        setNotice("Classify job completed.", "success");
+        await loadRun();
+      } else {
+        setNotice(`Classify job ${status.state}.`, "error");
+      }
+    }
+  } catch {
+    clearClassifyPolling();
+  }
+}
+
+async function startClassifyJob() {
+  const btn = $("#startClassifyJobBtn");
+  setBusy(btn, true, "Start classify job");
+  try {
+    const limit = Number($("#jobLimitInput")?.value || 0);
+    const status = await request("/api/classify/job", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tag: state.tag,
+        provider: $("#providerSelect").value,
+        model: $("#modelInput").value,
+        api_key: $("#apiKeyInput").value,
+        limit,
+      }),
+    });
+    state.classifyJobStatus = status;
+    render();
+    if (status.state === "running") {
+      setNotice("Classify job started.");
+      startClassifyPolling(status.job_id);
+    }
+  } catch (error) {
+    setNotice(error.message, "error");
+    setBusy(btn, false, "Start classify job");
+  }
+}
+
+async function refreshClassifyJobStatus() {
+  try {
+    const status = await request(apiUrl("/api/classify/status", { tag: state.tag }));
+    state.classifyJobStatus = status;
+    render();
+    if (status.state === "running") startClassifyPolling(status.job_id);
+  } catch (error) {
+    setNotice(error.message, "error");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Export job polling
+// ---------------------------------------------------------------------------
+
+function clearExportPolling() {
+  if (state.exportPollTimer) {
+    window.clearInterval(state.exportPollTimer);
+    state.exportPollTimer = null;
+  }
+}
+
+function startExportPolling(jobId = "") {
+  clearExportPolling();
+  state.exportPollTimer = window.setInterval(() => pollExportJobStatus(jobId), 2000);
+}
+
+async function pollExportJobStatus(jobId = "") {
+  try {
+    const params = jobId ? { tag: state.tag, job_id: jobId } : { tag: state.tag };
+    const status = await request(apiUrl("/api/export/status", params));
+    state.exportJobStatus = status;
+    if (state.view === "briefing") render();
+    const done = ["completed", "failed", "interrupted"].includes(status.state);
+    if (done) {
+      clearExportPolling();
+      if (status.state === "completed") {
+        setNotice("Export completed. Download links are now active.", "success");
+      } else {
+        setNotice(`Export ${status.state}.`, "error");
+      }
+    }
+  } catch {
+    clearExportPolling();
+  }
+}
+
+async function startExportJob(kind) {
+  const btnId = kind === "charts" ? "#chartsZipBtn" : "#briefingPdfBtn";
+  const btn = $(btnId);
+  setBusy(btn, true, kind === "charts" ? "Export charts ZIP" : "Export briefing PDF");
+  try {
+    const status = await request("/api/export/pdf-job", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tag: state.tag, kind }),
+    });
+    state.exportJobStatus = status;
+    render();
+    if (status.state === "running") {
+      setNotice(`${kind === "charts" ? "Charts" : "Briefing"} export job started.`);
+      startExportPolling(status.job_id);
+    }
+  } catch (error) {
+    setNotice(error.message, "error");
+    setBusy(btn, false, kind === "charts" ? "Export charts ZIP" : "Export briefing PDF");
+  }
+}
+
+async function refreshExportJobStatus() {
+  try {
+    const status = await request(apiUrl("/api/export/status", { tag: state.tag }));
+    state.exportJobStatus = status;
+    render();
+    if (status.state === "running") startExportPolling(status.job_id);
+  } catch (error) {
+    setNotice(error.message, "error");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Data actions
+// ---------------------------------------------------------------------------
 
 async function collect() {
   const button = $("#collectBtn");
@@ -537,16 +1282,22 @@ async function saveExport(kind = "all") {
     classified: "classified CSV",
     report: "briefing",
   };
-  const buttons = kind === "all" ? [$("#saveZipBtn"), $("#saveZipPanelBtn")].filter(Boolean) : [];
+  const buttons = kind === "all"
+    ? [$("#saveZipBtn"), $("#saveZipPanelBtn")].filter(Boolean)
+    : [];
   buttons.forEach((button) => setBusy(button, true, "Save ZIP"));
   setNotice(`Saving ${labels[kind] || "export"}...`);
   try {
-    const result = await request(apiUrl("/api/export/save", { tag: state.tag, kind }), { method: "POST" });
+    const result = await request(apiUrl("/api/export/save", { tag: state.tag, kind }), {
+      method: "POST",
+    });
     setNotice(`Saved ${result.filename} to Downloads.`, "success");
   } catch (error) {
     setNotice(error.message, "error");
   } finally {
-    buttons.forEach((button) => setBusy(button, false, button.id === "saveZipBtn" ? "Save ZIP" : "Save ZIP to Downloads"));
+    buttons.forEach((button) =>
+      setBusy(button, false, button.id === "saveZipBtn" ? "Save ZIP" : "Save ZIP to Downloads")
+    );
   }
 }
 
@@ -561,7 +1312,10 @@ async function upload() {
   const form = new FormData();
   form.append("file", input.files[0]);
   try {
-    const result = await request(apiUrl("/api/upload", { tag: state.tag }), { method: "POST", body: form });
+    const result = await request(apiUrl("/api/upload", { tag: state.tag }), {
+      method: "POST",
+      body: form,
+    });
     setNotice(`Loaded ${fmt.format(result.rows)} rows as ${result.kind}.`, "success");
     await loadRun();
   } catch (error) {
@@ -639,12 +1393,19 @@ async function briefing(useLlm) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Global bindings + init
+// ---------------------------------------------------------------------------
+
 function bindGlobalEvents() {
   $("#refreshBtn").addEventListener("click", loadRun);
-  $$(".top-actions [data-save-kind]").forEach((target) => target.addEventListener("click", handleSaveKindClick));
+  $$(".top-actions [data-save-kind]").forEach((target) =>
+    target.addEventListener("click", handleSaveKindClick)
+  );
   $("#tagInput").addEventListener("change", loadRun);
   $("#providerSelect").addEventListener("change", () => {
-    $("#modelInput").value = $("#providerSelect").value === "openai" ? "gpt-4o-mini" : "gpt-oss-120b";
+    $("#modelInput").value =
+      $("#providerSelect").value === "openai" ? "gpt-4o-mini" : "gpt-oss-120b";
   });
   $$(".tab").forEach((tab) => tab.addEventListener("click", () => setView(tab.dataset.view)));
 }

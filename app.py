@@ -792,12 +792,21 @@ def classify_status(tag: str = DEFAULT_TAG, job_id: str = "") -> JSONResponse:
 
 @app.post("/api/export/pdf-job")
 def pdf_export_job(request: PdfExportJobRequest) -> JSONResponse:
-    """Start a PDF export subprocess job (stub — Phase 3 fills real rendering)."""
+    """Start a PDF export subprocess job. Requires classified data."""
     tag = clean_tag(request.tag)
     active = find_active_job(RUNTIME, tag, "pdf_export")
     if active:
         return safe_json({**active, "started": False})
-    extra_args = ["--kind", request.kind]
+    cpath = classified_path(tag)
+    if not cpath.exists():
+        raise HTTPException(
+            status_code=400,
+            detail="No classified CSV found. Run preview or LLM classification first.",
+        )
+    extra_args = [
+        "--kind", request.kind,
+        "--classified_path", str(cpath),
+    ]
     status = start_job(
         RUNTIME, tag, "pdf_export",
         ROOT / "scripts" / "pdf_export_job.py",
@@ -884,6 +893,35 @@ def download_report(tag: str = DEFAULT_TAG) -> Response:
     if not path.exists():
         raise HTTPException(status_code=404, detail="No briefing exists for this run.")
     return FileResponse(path, media_type="text/markdown", filename=f"{clean_tag(tag)}_gm_reddit_strategy_briefing.md")
+
+
+@app.get("/api/download/charts")
+def download_charts(tag: str = DEFAULT_TAG) -> Response:
+    """Download the charts ZIP produced by a completed pdf_export job."""
+    clean = clean_tag(tag)
+    path = run_dir(clean) / "downloads" / f"{clean}_charts.zip"
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Charts ZIP not ready. Start an export job with kind=charts first.",
+        )
+    return FileResponse(path, media_type="application/zip", filename=f"{clean}_charts.zip")
+
+
+@app.get("/api/download/briefing-pdf")
+def download_briefing_pdf(tag: str = DEFAULT_TAG) -> Response:
+    """Download the briefing PDF produced by a completed pdf_export job."""
+    clean = clean_tag(tag)
+    path = run_dir(clean) / "downloads" / f"{clean}_briefing.pdf"
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Briefing PDF not ready. Start an export job with kind=briefing first.",
+        )
+    return FileResponse(
+        path, media_type="application/pdf",
+        filename=f"{clean}_gm_reddit_briefing.pdf",
+    )
 
 
 @app.get("/api/health")

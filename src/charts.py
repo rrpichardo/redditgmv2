@@ -65,6 +65,8 @@ CHART_SPECS: dict[str, dict[str, Any]] = {
     # --- High-level KPIs (no MIN_CELL — always show) ---
     "sentiment": {
         "type": "bar",
+        "x_field": "sentiment",
+        "y_field": "count",
         "sort": "value_desc",
         "color_map": {
             "positive": "#22c55e",
@@ -77,6 +79,8 @@ CHART_SPECS: dict[str, dict[str, Any]] = {
     },
     "flags": {
         "type": "bar",
+        "x_field": "flag",
+        "y_field": "count",
         "sort": "value_desc",
         "value_format": "count",
         "minimum_rows": 1,
@@ -84,6 +88,8 @@ CHART_SPECS: dict[str, dict[str, Any]] = {
     },
     "severity_summary": {
         "type": "bar",
+        "x_field": "severity",
+        "y_field": "count",
         "sort": "value_desc",
         "series_order": ["critical", "major", "minor", "none"],
         "color_map": {
@@ -98,6 +104,8 @@ CHART_SPECS: dict[str, dict[str, Any]] = {
     },
     "comment_type": {
         "type": "bar",
+        "x_field": "comment_type",
+        "y_field": "count",
         "sort": "value_desc",
         "value_format": "count_pct",
         "minimum_rows": 1,
@@ -105,6 +113,8 @@ CHART_SPECS: dict[str, dict[str, Any]] = {
     },
     "engagement": {
         "type": "bar",
+        "x_field": "level",
+        "y_field": "count",
         "sort": "value_desc",
         "series_order": ["high", "medium", "low", "unknown"],
         "color_map": {
@@ -120,6 +130,8 @@ CHART_SPECS: dict[str, dict[str, Any]] = {
     # --- Complaint themes ---
     "complaints": {
         "type": "bar",
+        "x_field": "theme",
+        "y_field": "count",
         "sort": "value_desc",
         "value_format": "count",
         "minimum_rows": 1,
@@ -127,6 +139,8 @@ CHART_SPECS: dict[str, dict[str, Any]] = {
     },
     "all_complaint_mentions": {
         "type": "bar",
+        "x_field": "theme",
+        "y_field": "count",
         "sort": "value_desc",
         "value_format": "count",
         "minimum_rows": 1,
@@ -134,6 +148,8 @@ CHART_SPECS: dict[str, dict[str, Any]] = {
     },
     "engagement_weighted_themes": {
         "type": "bar",
+        "x_field": "theme",
+        "y_field": "weighted_score",
         "sort": "value_desc",
         "value_format": "score",
         "minimum_rows": 1,
@@ -142,6 +158,8 @@ CHART_SPECS: dict[str, dict[str, Any]] = {
     # --- EV / competitor ---
     "ev": {
         "type": "grouped_bar",
+        "x_field": "powertrain",
+        "series_keys": ["complaint_rate_pct", "reliability_concern_pct", "software_tech_issue_pct"],
         "series_order": ["EV topic", "Non-EV topic"],
         "value_format": "pct",
         "minimum_rows": 1,
@@ -149,6 +167,8 @@ CHART_SPECS: dict[str, dict[str, Any]] = {
     },
     "competitor_breakdown": {
         "type": "grouped_bar",
+        "x_field": "competitor_brand",
+        "series_keys": ["count", "complaint_rate_pct", "negative_pct"],
         "sort": "value_desc",
         "value_format": "count",
         "minimum_rows": 1,
@@ -157,6 +177,8 @@ CHART_SPECS: dict[str, dict[str, Any]] = {
     # --- Subreddit ---
     "subreddit": {
         "type": "bar",
+        "x_field": "subreddit_norm",
+        "y_field": "comment_count",
         "sort": "value_desc",
         "value_format": "count",
         "minimum_rows": MIN_CELL,
@@ -183,6 +205,8 @@ CHART_SPECS: dict[str, dict[str, Any]] = {
     # --- Vehicle-level detail (MIN_CELL applied) ---
     "vehicles": {
         "type": "bar",
+        "x_field": "vehicle_mentioned",
+        "y_field": "complaint_rate_pct",
         "sort": "value_desc",
         "value_format": "pct",
         "minimum_rows": MIN_CELL,
@@ -191,6 +215,10 @@ CHART_SPECS: dict[str, dict[str, Any]] = {
     },
     "severity_by_model": {
         "type": "stacked_bar",
+        # long-format: vehicle_mentioned × issue_severity × count
+        "x_field": "vehicle_mentioned",
+        "series_field": "issue_severity",
+        "value_field": "count",
         "sort": "total_desc",
         "series_order": ["critical", "major", "minor", "none"],
         "color_map": {
@@ -206,6 +234,8 @@ CHART_SPECS: dict[str, dict[str, Any]] = {
     },
     "complaint_by_model": {
         "type": "stacked_bar_100",
+        # wide-format: vehicle col + one col per complaint category
+        "x_field": "vehicle",
         "sort": "total_desc",
         "normalize": True,
         "value_format": "pct",
@@ -221,6 +251,8 @@ CHART_SPECS: dict[str, dict[str, Any]] = {
     },
     "sentiment_by_model": {
         "type": "stacked_bar_100",
+        # wide-format: vehicle col + one col per sentiment value
+        "x_field": "vehicle",
         "sort": "negative_desc",
         "normalize": True,
         "series_order": ["negative", "neutral", "positive"],
