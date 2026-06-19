@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from src.briefing import write_briefing
 from src.charts import build_chart_payload, build_detail_data
 # Bare import so test mocks (patch "app.start_job", "app.find_active_job") resolve correctly
 from src.jobs import find_active_job, job_path, read_status, start_job
@@ -37,10 +38,8 @@ from src.gm_insights import (
     complaint_summary,
     ev_comparison,
     evidence_table,
-    fallback_synthesis,
     filter_analyzed,
     flag_summary,
-    generate_synthesis_with_llm,
     load_classified,
     load_runtime_frame,
     normalize_reddit_frame,
@@ -755,18 +754,19 @@ def briefing(request: BriefingRequest) -> JSONResponse:
     df = load_frame(request.tag)
     if df.empty:
         raise HTTPException(status_code=400, detail="No data is loaded for this run.")
-    payload = summary_payload(df)
-    if request.use_llm:
-        report = generate_synthesis_with_llm(payload, provider_config(request.provider, request.model, request.api_key))
-    else:
-        report = fallback_synthesis(payload)
     path = report_path(request.tag)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Atomic write: temp file then replace so a partial write is never visible
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(report, encoding="utf-8")
-    os.replace(tmp, path)
-    return safe_json({"ok": True, "path": str(path), "report": report})
+    result = write_briefing(
+        df,
+        path,
+        provider=(
+            provider_config(request.provider, request.model, request.api_key)
+            if request.use_llm
+            else None
+        ),
+        use_llm=request.use_llm,
+        fallback_on_error=False,
+    )
+    return safe_json({"ok": True, "path": str(path), "report": result.report})
 
 
 @app.post("/api/classify/job")
