@@ -300,3 +300,36 @@ def test_artifact_rejects_non_snapshot_path():
 
     resp = client.get(f"/api/pipeline/artifact?tag={tag}&run_id={run_id}&step={step}&id=0")
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# GET /api/pipeline/log
+# ---------------------------------------------------------------------------
+
+def test_pipeline_log_returns_text_for_existing_attempt():
+    """Log endpoint returns text/plain content when an attempt log exists."""
+    from src.run_store import ensure_attempt_layout
+
+    tag = f"test_log_{uuid.uuid4().hex[:8]}"
+    run_id = uuid.uuid4().hex
+    step = "classify"
+
+    # Create run, step, and attempt with a real log file.
+    paths = ensure_attempt_layout(app_module.RUNTIME, tag, run_id, step, 1)
+    paths.log_path.write_text("classify started\nclassify done\n", encoding="utf-8")
+
+    with _store() as store:
+        store.create_run(run_id, tag, config={})
+        store.upsert_step(run_id, step, state="completed")
+        attempt = store.start_attempt(run_id, step, log_path=str(paths.log_path))
+        store.finish_attempt(run_id, step, attempt_no=attempt["attempt_no"], state="completed", processed=3, total=3)
+
+    resp = client.get(f"/api/pipeline/log?tag={tag}&run_id={run_id}&step={step}")
+    assert resp.status_code == 200
+    assert "classify done" in resp.text
+
+
+def test_pipeline_log_returns_404_for_unknown_run():
+    """Log endpoint returns 404 when the run_id does not exist."""
+    resp = client.get(f"/api/pipeline/log?tag=nonexistent&run_id=doesnotexist&step=classify")
+    assert resp.status_code == 404
