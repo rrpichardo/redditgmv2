@@ -305,6 +305,7 @@ class AnalysisCoordinator:
         job_id: str | None = None,
         project_root: Path = _PROJECT_ROOT,
         child_runner: ChildRunner | None = None,
+        steps_to_run: list[str] | None = None,
     ):
         self.runtime_root = Path(runtime_root)
         self.db_path = Path(db_path)
@@ -319,6 +320,8 @@ class AnalysisCoordinator:
         self.prepare_result: PrepareResult | None = None
         self._store: RunStore | None = None
         self._lock_acquired = False
+        # When set, only these steps will be executed; others are skipped (state left untouched)
+        self.steps_to_run: list[str] | None = steps_to_run
 
     @property
     def store(self) -> RunStore:
@@ -347,24 +350,46 @@ class AnalysisCoordinator:
             if not lock.acquired:
                 raise ActiveRunError(lock.active_run_id)
             self._lock_acquired = True
-            self.store.create_run(
-                self.run_id,
-                self.tag,
-                config=self.config.persisted(),
-                coordinator_pid=os.getpid(),
-                heartbeat_at=time.time(),
-            )
-            for step in STEP_ORDER:
-                self.store.upsert_step(self.run_id, step, state="pending")
+
+            # Retry path: run record already exists; just mark it running again.
+            # Fresh path: create the run record and initialize all steps as pending.
+            if self.steps_to_run is not None:
+                self.store.update_run(
+                    self.run_id,
+                    state="running",
+                    heartbeat_at=time.time(),
+                )
+            else:
+                self.store.create_run(
+                    self.run_id,
+                    self.tag,
+                    config=self.config.persisted(),
+                    coordinator_pid=os.getpid(),
+                    heartbeat_at=time.time(),
+                )
+                for step in STEP_ORDER:
+                    self.store.upsert_step(self.run_id, step, state="pending")
             self._coordinator_status("running")
 
-            self.prepare_result = self._execute_prepare()
+            # Retry path: if prepare is not in the steps to run, reconstruct PrepareResult
+            # from the working data files instead of re-running the prepare step.
+            if self.steps_to_run is not None and "prepare" not in self.steps_to_run:
+                self.prepare_result = self._load_prepare_result()
+            else:
+                self.prepare_result = self._execute_prepare()
             if self.prepare_result.analyzable_rows == 0:
-                self._record_decision("classify", "blocked", "No analyzable rows.")
-                self._record_decision("briefing", "blocked", "No analyzable rows.")
-                self._record_decision("trends", "blocked", "No analyzable rows.")
-                self._record_decision("trend_pdf", "skipped", "Trends did not run.")
-                self._record_decision("qa_index", "blocked", "No analyzable rows.")
+                # Only block steps that are in our execution set (or all, for a fresh run)
+                to_run = set(self.steps_to_run) if self.steps_to_run is not None else set(STEP_ORDER)
+                if "classify" in to_run:
+                    self._record_decision("classify", "blocked", "No analyzable rows.")
+                if "briefing" in to_run:
+                    self._record_decision("briefing", "blocked", "No analyzable rows.")
+                if "trends" in to_run:
+                    self._record_decision("trends", "blocked", "No analyzable rows.")
+                if "trend_pdf" in to_run:
+                    self._record_decision("trend_pdf", "skipped", "Trends did not run.")
+                if "qa_index" in to_run:
+                    self._record_decision("qa_index", "blocked", "No analyzable rows.")
                 final_state = "blocked"
             else:
                 self._execute_remaining_steps()
@@ -425,6 +450,46 @@ class AnalysisCoordinator:
             return existing, existing
         return load_runtime_frame(data_root), None
 
+    def _load_prepare_result(self) -> PrepareResult:
+        """Reconstruct a PrepareResult from the working classified file without re-running prepare.
+
+        Used in retry mode when 'prepare' is not in steps_to_run. Reads whatever CSV
+        exists in the published output root (not staging) to derive row counts.
+        """
+        tag_root = self.runtime_root / self.tag
+        classified = tag_root / "classified" / "classified_posts.csv"
+        if not classified.exists():
+            # No prior classified file — treat as zero analyzable rows
+            return PrepareResult(
+                output_path=classified,
+                analyzable_rows=0,
+                pending_rows=0,
+                valid_timestamps=0,
+                date_span_days=0,
+            )
+        frame = pd.read_csv(classified, dtype=str, keep_default_na=False)
+        from src.gm_insights import ensure_label_columns
+        frame = ensure_label_columns(frame)
+        eligible = ~frame["skip_classification"].astype(str).str.lower().isin(["true", "1", "yes"])
+        analyzable = int(eligible.sum())
+        pending = int(
+            (eligible & frame["classifier_mode"].fillna("").astype(str).eq("")).sum()
+        ) if not frame.empty else 0
+        if analyzable:
+            timestamps = pd.to_datetime(frame.loc[eligible, "created_at_norm"], errors="coerce")
+            valid = timestamps.dropna()
+        else:
+            valid = pd.Series([], dtype="datetime64[ns]")
+        valid_count = int(valid.size)
+        span_days = int((valid.max() - valid.min()).days) if valid_count > 1 else 0
+        return PrepareResult(
+            output_path=classified,
+            analyzable_rows=analyzable,
+            pending_rows=pending,
+            valid_timestamps=valid_count,
+            date_span_days=span_days,
+        )
+
     def _execute_prepare(self) -> PrepareResult:
         attempt_no, paths = self._start_attempt("prepare")
         self._log(paths, "prepare: loading source data")
@@ -463,62 +528,87 @@ class AnalysisCoordinator:
             self._finish_attempt("prepare", attempt_no, paths, failed)
             raise
 
+    def _should_run(self, step: str) -> bool:
+        """Return True if this step should be executed (respects steps_to_run filter)."""
+        if self.steps_to_run is None:
+            return True
+        return step in self.steps_to_run
+
     def _execute_remaining_steps(self) -> None:
         assert self.prepare_result is not None
         has_key = bool(self.config.effective_api_key())
         pending = self.prepare_result.pending_rows
 
-        if pending and not has_key:
-            classify = self._record_decision(
-                "classify",
-                "blocked",
-                f"No effective API key ({self.config.api_key_env}).",
-                total=pending,
-            )
-        elif pending:
-            classify = self._execute_step("classify")
+        # classify step — run only when included in steps_to_run (or all steps)
+        if self._should_run("classify"):
+            if pending and not has_key:
+                classify = self._record_decision(
+                    "classify",
+                    "blocked",
+                    f"No effective API key ({self.config.api_key_env}).",
+                    total=pending,
+                )
+            elif pending:
+                classify = self._execute_step("classify")
+            else:
+                classify = self._execute_step(
+                    "classify",
+                    immediate=StepResult(
+                        state="completed",
+                        processed=0,
+                        total=0,
+                        artifact_paths=[self.working_classified_path],
+                    ),
+                )
         else:
-            classify = self._execute_step(
-                "classify",
-                immediate=StepResult(
-                    state="completed",
-                    processed=0,
-                    total=0,
-                    artifact_paths=[self.working_classified_path],
-                ),
-            )
+            # Step not in retry set — read its current DB state to determine cascade behavior
+            existing = self.store.get_step(self.run_id, "classify")
+            classify = StepResult(state=existing["state"] if existing else "skipped")
 
         if classify.state == "failed":
-            self._record_decision("briefing", "blocked", "Classification failed.")
-            self._record_decision("trends", "blocked", "Classification failed.")
-            self._record_decision("trend_pdf", "skipped", "Trends did not run.")
-            self._record_decision("qa_index", "blocked", "Classification failed.")
+            # Only record downstream blocks for steps that are in our execution set
+            if self._should_run("briefing"):
+                self._record_decision("briefing", "blocked", "Classification failed.")
+            if self._should_run("trends"):
+                self._record_decision("trends", "blocked", "Classification failed.")
+            if self._should_run("trend_pdf"):
+                self._record_decision("trend_pdf", "skipped", "Trends did not run.")
+            if self._should_run("qa_index"):
+                self._record_decision("qa_index", "blocked", "Classification failed.")
             return
 
-        self._execute_step("briefing")
+        if self._should_run("briefing"):
+            self._execute_step("briefing")
 
-        if self.prepare_result.analyzable_rows < 2:
-            trends = self._record_decision(
-                "trends", "blocked", "At least 2 analyzable rows are required for clustering."
-            )
-        elif not has_key:
-            trends = self._record_decision(
-                "trends", "blocked", f"No effective API key ({self.config.api_key_env})."
-            )
+        # trends step
+        if self._should_run("trends"):
+            if self.prepare_result.analyzable_rows < 2:
+                trends = self._record_decision(
+                    "trends", "blocked", "At least 2 analyzable rows are required for clustering."
+                )
+            elif not has_key:
+                trends = self._record_decision(
+                    "trends", "blocked", f"No effective API key ({self.config.api_key_env})."
+                )
+            else:
+                trends = self._execute_step("trends")
         else:
-            trends = self._execute_step("trends")
+            existing = self.store.get_step(self.run_id, "trends")
+            trends = StepResult(state=existing["state"] if existing else "skipped")
 
-        if trends.state in _SUCCESS_STATES:
-            self._execute_step("trend_pdf")
-        else:
-            self._record_decision("trend_pdf", "skipped", "Trends did not complete.")
+        if self._should_run("trend_pdf"):
+            if trends.state in _SUCCESS_STATES:
+                self._execute_step("trend_pdf")
+            else:
+                self._record_decision("trend_pdf", "skipped", "Trends did not complete.")
 
-        if not has_key:
-            self._record_decision(
-                "qa_index", "blocked", f"No effective API key ({self.config.api_key_env})."
-            )
-        else:
-            self._execute_step("qa_index")
+        if self._should_run("qa_index"):
+            if not has_key:
+                self._record_decision(
+                    "qa_index", "blocked", f"No effective API key ({self.config.api_key_env})."
+                )
+            else:
+                self._execute_step("qa_index")
 
     def _start_attempt(self, step: str) -> tuple[int, AttemptPaths]:
         next_no = len(self.store.get_attempts(self.run_id, step)) + 1
@@ -817,10 +907,18 @@ def main() -> None:
     parser.add_argument("--api_key_env", default="OPENROUTER_API_KEY")
     parser.add_argument("--n_clusters", type=int, default=10)
     parser.add_argument("--embedding_model", default="text-embedding-3-small")
+    # When set, only execute this step and its transitive dependents; all other steps are skipped
+    parser.add_argument("--retry-from-step", default="", dest="retry_from_step")
     args = parser.parse_args()
 
     runtime_root = Path(args.runtime_root)
     run_id = args.run_id or uuid.uuid4().hex
+
+    # Resolve the steps_to_run list when --retry-from-step is provided
+    steps_to_run: list[str] | None = None
+    if args.retry_from_step:
+        steps_to_run = retry_steps(args.retry_from_step)
+
     coordinator = AnalysisCoordinator(
         runtime_root=runtime_root,
         db_path=Path(args.db_path) if args.db_path else runtime_root / "runs.db",
@@ -835,6 +933,7 @@ def main() -> None:
             n_clusters=max(2, args.n_clusters),
             embedding_model=args.embedding_model,
         ),
+        steps_to_run=steps_to_run,
     )
     try:
         result = coordinator.run()
