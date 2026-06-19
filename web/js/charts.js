@@ -212,6 +212,101 @@ function optHeatmap(spec, data) {
   };
 }
 
+// Quadrant scatter: velocity (x) vs z-score (y), colored by confidence banner.
+// Clusters without valid velocity or zscore signals are excluded.
+function optQuadrant(clusters) {
+  const confColor = { high: "#16a34a", medium: "#d97706", low: "#94a3b8" };
+  const data = clusters
+    .filter((c) => c.trend_signal?.velocity?.valid && c.trend_signal?.zscore?.valid)
+    .map((c) => {
+      const sig = c.trend_signal;
+      return {
+        value: [Number(sig.velocity.velocity ?? 0), Number(sig.zscore.zscore ?? 0)],
+        name: c.label?.short_label || `Cluster ${c.cluster_id}`,
+        itemStyle: { color: confColor[sig.confidence_banner] || "#94a3b8" },
+      };
+    });
+  return {
+    grid: { left: 16, right: 24, top: 24, bottom: 36, containLabel: true },
+    xAxis: { type: "value", name: "Velocity", nameLocation: "middle", nameGap: 28 },
+    yAxis: { type: "value", name: "Z-score", nameLocation: "middle", nameGap: 40 },
+    tooltip: {
+      trigger: "item",
+      // esc() sanitizes cluster labels to prevent XSS in tooltip HTML.
+      formatter: (p) => `${esc(p.data.name)}<br/>Velocity: ${Number(p.value[0]).toFixed(2)}<br/>Z-score: ${Number(p.value[1]).toFixed(2)}`,
+    },
+    series: [{
+      type: "scatter",
+      data,
+      symbolSize: 12,
+      // Crosshair lines at origin to divide the quadrants.
+      markLine: {
+        silent: true,
+        symbol: "none",
+        lineStyle: { color: "#cbd5e1", type: "dashed" },
+        data: [{ xAxis: 0 }, { yAxis: 0 }],
+      },
+    }],
+  };
+}
+
+// Horizontal bar leaderboard ranked by velocity, capped at 15 clusters.
+function optLeaderboard(clusters) {
+  const confColor = { high: "#16a34a", medium: "#d97706", low: "#94a3b8" };
+  const sorted = [...clusters]
+    .filter((c) => c.trend_signal?.velocity?.valid)
+    .sort((a, b) => (b.trend_signal.velocity.velocity ?? 0) - (a.trend_signal.velocity.velocity ?? 0))
+    .slice(0, 15);
+  const cats = sorted.map((c) => c.label?.short_label || `Cluster ${c.cluster_id}`);
+  const data = sorted.map((c) => ({
+    // Convert velocity fraction to percentage points for readability.
+    value: Number(((c.trend_signal.velocity.velocity ?? 0) * 100).toFixed(1)),
+    itemStyle: { color: confColor[c.trend_signal.confidence_banner] || "#94a3b8" },
+  }));
+  return {
+    grid: { left: 8, right: 48, top: 8, bottom: 8, containLabel: true },
+    xAxis: { type: "value", axisLabel: { formatter: "{value}%" } },
+    yAxis: { type: "category", data: cats, inverse: true },
+    tooltip: { trigger: "axis", valueFormatter: (v) => `${v}%` },
+    series: [{ type: "bar", data, barMaxWidth: 20 }],
+  };
+}
+
+// Simple line chart for a single timeseries field in a tsd (time-series data) object.
+// tsd must have a `buckets` array of x-axis labels and a `[seriesKey]` array of values.
+function optLineTimeseries(tsd, seriesKey) {
+  return {
+    grid: { left: 8, right: 24, top: 16, bottom: 8, containLabel: true },
+    xAxis: { type: "category", data: tsd.buckets || [], axisLabel: { rotate: 30, fontSize: 10 } },
+    yAxis: { type: "value" },
+    tooltip: { trigger: "axis" },
+    series: [{ type: "line", data: tsd[seriesKey] || [], smooth: true, areaStyle: { opacity: 0.12 } }],
+  };
+}
+
+// Stacked area chart for sentiment timeseries (positive/neutral/negative bands).
+// Expects tsd.buckets, tsd.positive, tsd.neutral, tsd.negative arrays.
+function optStackedAreaTimeseries(tsd) {
+  const palette = { positive: "#16a34a", neutral: "#94a3b8", negative: "#dc2626" };
+  const series = ["positive", "neutral", "negative"].map((key) => ({
+    name: key.charAt(0).toUpperCase() + key.slice(1),
+    type: "line",
+    stack: "sentiment",   // ECharts stacks series that share the same stack key.
+    smooth: true,
+    areaStyle: {},
+    itemStyle: { color: palette[key] },
+    data: tsd[key] || [],
+  }));
+  return {
+    legend: {},
+    grid: { left: 8, right: 24, top: 32, bottom: 8, containLabel: true },
+    xAxis: { type: "category", data: tsd.buckets || [], axisLabel: { rotate: 30, fontSize: 10 } },
+    yAxis: { type: "value" },
+    tooltip: { trigger: "axis" },
+    series,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -252,6 +347,19 @@ export function renderChartInto(el, spec, data) {
   instances.set(el, inst);
 }
 
+// Generic ECharts mount: disposes any existing instance on el, then renders option.
+// Use this when you have a fully-built option object and don't need spec dispatch.
+export function renderIntoEl(el, option) {
+  if (!el || !option) return;
+  disposeChart(el);
+  ensureTheme();
+  // Read reduced-motion preference at render time (user may toggle it while app is open).
+  const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+  const inst = echarts.init(el, THEME_NAME, { renderer: "canvas" });
+  inst.setOption(Object.assign({ animation: !reduceMotion }, option));
+  instances.set(el, inst);
+}
+
 // Walk all [data-chart] elements under root, match each id to specs/data in payload, and render.
 export function mountViewCharts(root, payload) {
   if (!root || !payload) return;
@@ -263,4 +371,28 @@ export function mountViewCharts(root, payload) {
     if (!spec) { el.innerHTML = `<div class="notice">Chart spec not found: ${esc(id)}.</div>`; return; }
     renderChartInto(el, spec, cdata[id]);
   });
+}
+
+// Named exports for the M3 dashboard opt builders and sparkline renderer.
+export const buildQuadrantOption = optQuadrant;
+export const buildLeaderboardOption = optLeaderboard;
+export const buildLineTimeseriesOption = optLineTimeseries;
+export const buildStackedAreaOption = optStackedAreaTimeseries;
+
+// Mini inline sparkline: fixed 80×32 canvas, no axes, no tooltip.
+// weeklyData is a plain array of numbers (one per week bucket).
+export function renderSparkline(el, weeklyData) {
+  if (!el || !weeklyData?.length) return;
+  disposeChart(el);
+  ensureTheme();
+  // Fixed pixel size: sparklines are decorative and must not reflow.
+  const inst = echarts.init(el, THEME_NAME, { renderer: "canvas", width: 80, height: 32 });
+  inst.setOption({
+    animation: false,
+    grid: { left: 0, right: 0, top: 2, bottom: 2 },
+    xAxis: { type: "category", show: false, data: weeklyData.map((_, i) => i) },
+    yAxis: { type: "value", show: false },
+    series: [{ type: "line", data: weeklyData, smooth: true, symbol: "none", lineStyle: { width: 1.5 } }],
+  });
+  instances.set(el, inst);
 }
