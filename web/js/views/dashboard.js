@@ -227,7 +227,7 @@ export function dashboard() {
         <div id="sentTimeChart" style="height:220px"></div>
       </section>
     </div>
-    <div class="panel-grid two" style="margin-top:0.75rem">
+    <div class="panel-grid" style="margin-top:0.75rem">
       ${chartPanel("priority", "Priority map", "volume × negativity")}
     </div>`;
 }
