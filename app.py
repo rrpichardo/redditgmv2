@@ -525,7 +525,7 @@ def run_snapshot(tag: str, filters: dict[str, Any] | None = None) -> dict[str, A
             ),
             "cooccurrence": corr.where(pd.notna(corr), 0).to_dict() if not corr.empty else {},
         }
-        evidence = dataframe_records(evidence_table(selected, limit=200), limit=200)
+        evidence = dataframe_records(evidence_table(selected, limit=500), limit=500)
         # New Phase 1 chart contract: chart_specs + chart_data.
         chart_contract = build_chart_payload(selected)
     return {
@@ -586,8 +586,18 @@ def request_filters(
     competitor: list[str] | None,
     search: str,
     min_score: float | None,
+    date_start: str | None = None,
+    date_end: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    from datetime import date as _date
+
+    def _parse(s: str | None) -> _date | None:
+        try:
+            return _date.fromisoformat(s) if s else None
+        except ValueError:
+            return None
+
+    result: dict[str, Any] = {
         "sentiment": sentiment or [],
         "vehicle": vehicle or [],
         "subreddit": subreddit or [],
@@ -597,6 +607,10 @@ def request_filters(
         "search": search,
         "min_score": min_score,
     }
+    start, end = _parse(date_start), _parse(date_end)
+    if start or end:
+        result["date_range"] = [start, end]
+    return result
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -615,8 +629,10 @@ def get_run(
     competitor: list[str] | None = Query(default=None),
     search: str = "",
     min_score: float | None = None,
+    date_start: str | None = None,
+    date_end: str | None = None,
 ) -> JSONResponse:
-    filters = request_filters(sentiment, vehicle, subreddit, severity, comment_type, competitor, search, min_score)
+    filters = request_filters(sentiment, vehicle, subreddit, severity, comment_type, competitor, search, min_score, date_start, date_end)
     return safe_json(run_snapshot(tag, filters))
 
 
@@ -631,11 +647,13 @@ def charts_detail(
     competitor: list[str] | None = Query(default=None),
     search: str = "",
     min_score: float | None = None,
+    date_start: str | None = None,
+    date_end: str | None = None,
 ) -> JSONResponse:
     """Serve lazy chart data (category_by_model heatmap and flag co-occurrence).
     Accepts the same filter params as /api/run so the browser can pass them through."""
     df = load_frame(tag)
-    filters = request_filters(sentiment, vehicle, subreddit, severity, comment_type, competitor, search, min_score)
+    filters = request_filters(sentiment, vehicle, subreddit, severity, comment_type, competitor, search, min_score, date_start, date_end)
     selected = filter_analyzed(df, filters) if not df.empty else pd.DataFrame()
     return JSONResponse(build_detail_data(selected))
 

@@ -650,8 +650,16 @@ def filter_analyzed(df: pd.DataFrame, filters: dict[str, Any]) -> pd.DataFrame:
             out = out[out[column].isin(values)]
     if filters.get("date_range") and len(filters["date_range"]) == 2:
         start, end = filters["date_range"]
-        dates = out["created_at_norm"].dt.date
-        out = out[(dates >= start) & (dates <= end)]
+        if "created_at_norm" in out.columns and (start or end):
+            # Compute dates once against the current (possibly already filtered) index
+            # to avoid boolean-Series reindexing warnings from index mismatch.
+            dates = pd.to_datetime(out["created_at_norm"], errors="coerce").dt.date
+            if start and end:
+                out = out[(dates >= start) & (dates <= end)]
+            elif start:
+                out = out[dates >= start]
+            else:
+                out = out[dates <= end]
     search = (filters.get("search") or "").strip().lower()
     if search:
         haystack = (out["title_norm"].fillna("") + " " + out["target_text"].fillna("") + " " + out["description"].fillna("")).str.lower()
@@ -963,7 +971,7 @@ def competitor_breakdown_detail(df: pd.DataFrame) -> pd.DataFrame:
     return grouped.sort_values("count", ascending=False).reset_index()
 
 
-def evidence_table(df: pd.DataFrame, limit: int = 200) -> pd.DataFrame:
+def evidence_table(df: pd.DataFrame, limit: int = 500) -> pd.DataFrame:
     analyzed = analyzed_frame(df)
     columns = [
         "created_at_norm",
@@ -976,10 +984,12 @@ def evidence_table(df: pd.DataFrame, limit: int = 200) -> pd.DataFrame:
         "score_norm",
         "description",
         "title_norm",
+        "target_text",  # raw post/comment body for inline reading
         "permalink_norm",
     ]
     existing = [col for col in columns if col in analyzed.columns]
-    out = analyzed.loc[:, existing].sort_values("created_at_norm", ascending=False, na_position="last").head(limit)
+    # Sort by classification confidence so highest-signal rows appear first.
+    out = analyzed.loc[:, existing].sort_values("score_norm", ascending=False, na_position="last").head(limit)
     if "created_at_norm" in out:
         out["created_at_norm"] = pd.to_datetime(out["created_at_norm"], errors="coerce").dt.strftime("%Y-%m-%d")
     return out

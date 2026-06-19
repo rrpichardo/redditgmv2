@@ -30,6 +30,7 @@ export const state = {
   qaHits: null,
   qaAnswer: null,
   qaPollTimer: null,
+  evidencePage: 0,  // current page index for the evidence card list (25 per page)
 
   // Pipeline tracking (M2-frontend implements full UI)
   pipelineRunId: null,
