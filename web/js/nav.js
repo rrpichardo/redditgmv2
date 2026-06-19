@@ -3,7 +3,7 @@
 import { state, $, $$ } from "./state.js";
 import { mountViewCharts } from "./charts.js";
 import { saveExport, startExportJob, refreshExportJobStatus } from "./app.js";
-import { dashboard } from "./views/dashboard.js";
+import { dashboard, mountDashboardCharts } from "./views/dashboard.js";
 import { explorerView, bindExplorerEvents } from "./views/explore.js";
 import { gatheringView, bindGatheringEvents } from "./views/gathering.js";
 import { pipelineView, bindPipelineEvents } from "./views/pipeline.js";
@@ -31,6 +31,7 @@ export function render() {
   bindViewEvents();
   // Mount any [data-chart] panels via ECharts after HTML is in the DOM.
   mountViewCharts(root, state.data);
+  mountDashboardCharts();
 }
 
 export function handleSaveKindClick(event) {
