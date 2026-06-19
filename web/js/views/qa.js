@@ -1,4 +1,5 @@
 // qa.js — Q&A / RAG view, evidence cards, and index-build job polling.
+// Provider/model/api_key now come from state (set in Settings tab) rather than DOM inputs.
 import { state, $, esc, fmt } from "../state.js";
 import { apiUrl, request } from "../api.js";
 import { setNotice, setBusy } from "../components.js";
@@ -140,7 +141,8 @@ async function pollQaStatus(jobId = "") {
     const params = jobId ? { tag: state.tag, job_id: jobId } : { tag: state.tag };
     const status = await request(apiUrl("/api/qa/status", params));
     state.qaJobStatus = status;
-    if (state.view === "qa") render();
+    // Q&A is now embedded inside the "explorer" tab, not its own "qa" tab.
+    if (state.view === "explorer") render();
     const done = ["completed", "failed", "interrupted"].includes(status.state);
     if (done) {
       clearQaPolling();
@@ -159,7 +161,7 @@ export async function refreshQaStatus() {
   try {
     const status = await request(apiUrl("/api/qa/status", { tag: state.tag }));
     state.qaJobStatus = status;
-    if (state.view === "qa") render();
+    if (state.view === "explorer") render();
     if (status.state === "running") startQaPolling(status.job_id);
   } catch (error) {
     setNotice(error.message, "error");
@@ -179,15 +181,15 @@ export async function startQaBuildIndex() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         tag: state.tag,
-        provider: $("#providerSelect").value,
-        model: $("#modelInput").value,
-        api_key: $("#apiKeyInput").value,
+        provider: state.provider,
+        model: state.model,
+        api_key: state.apiKey,
       }),
     });
     state.qaJobStatus = status;
     state.qaHits = null;
     state.qaAnswer = null;
-    if (state.view === "qa") render();
+    if (state.view === "explorer") render();
     if (status.state === "running") {
       setNotice("Index build started.");
       startQaPolling(status.job_id);
@@ -212,15 +214,15 @@ export async function submitQaQuestion() {
       body: JSON.stringify({
         tag: state.tag,
         question,
-        provider: $("#providerSelect").value,
-        model: $("#modelInput").value,
-        api_key: $("#apiKeyInput").value,
+        provider: state.provider,
+        model: state.model,
+        api_key: state.apiKey,
         k: 8,
       }),
     });
     state.qaHits = result.hits || [];
     state.qaAnswer = result.answer || "";
-    if (state.view === "qa") render();
+    if (state.view === "explorer") render();
   } catch (error) {
     setNotice(error.message, "error");
   } finally {
@@ -242,15 +244,15 @@ export async function submitQaSearch() {
       body: JSON.stringify({
         tag: state.tag,
         query: question,
-        provider: $("#providerSelect").value,
-        model: $("#modelInput").value,
-        api_key: $("#apiKeyInput").value,
+        provider: state.provider,
+        model: state.model,
+        api_key: state.apiKey,
         k: 8,
       }),
     });
     state.qaHits = result.hits || [];
     state.qaAnswer = null;
-    if (state.view === "qa") render();
+    if (state.view === "explorer") render();
   } catch (error) {
     setNotice(error.message, "error");
   } finally {

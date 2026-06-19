@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+import traceback
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -25,6 +26,7 @@ def run_trend_job(
     provider: ProviderConfig,
     n_clusters: int = 10,
     embedding_model: str = "text-embedding-3-small",
+    output_root: Path | None = None,
 ) -> None:
     """Load classified data, run the clustering pipeline, and write job status."""
     status_path = job_path(runtime_root, tag, job_id)
@@ -36,6 +38,7 @@ def run_trend_job(
             "total": total,
         })
 
+    destination_root = Path(output_root) if output_root is not None else Path(runtime_root)
     try:
         # Initial heartbeat so the API sees the job is alive
         heartbeat()
@@ -45,7 +48,7 @@ def run_trend_job(
             tag=tag,
             df=df,
             provider=provider,
-            runtime_root=runtime_root,
+            runtime_root=destination_root,
             n_clusters=n_clusters,
             embedding_model=embedding_model,
             heartbeat_cb=heartbeat,
@@ -56,9 +59,9 @@ def run_trend_job(
         try:
             heartbeat(result["n_clusters"], result["n_clusters"])
             trend_result = run_trend_analysis(
-                tag=tag, df=df, runtime_root=runtime_root
+                tag=tag, df=df, runtime_root=destination_root
             )
-            signals_path = str(trends_dir(runtime_root, tag) / "trend_signals.json")
+            signals_path = str(trends_dir(destination_root, tag) / "trend_signals.json")
             result["artifact_paths"].append(signals_path)
             result["n_signals"] = trend_result["n_clusters"]
         except Exception as trend_exc:
@@ -78,6 +81,7 @@ def run_trend_job(
         write_status(status_path, completed_fields)
 
     except Exception as exc:
+        traceback.print_exc()
         write_status(status_path, {
             "state": "failed",
             "error": str(exc),
@@ -96,6 +100,7 @@ def main() -> None:
 
     # Data
     parser.add_argument("--classified_path", required=True)
+    parser.add_argument("--output_root", default="")
 
     # Clustering
     parser.add_argument("--n_clusters", type=int, default=10)
@@ -125,6 +130,7 @@ def main() -> None:
         provider=provider,
         n_clusters=args.n_clusters,
         embedding_model=args.embedding_model,
+        output_root=Path(args.output_root) if args.output_root else None,
     )
 
 

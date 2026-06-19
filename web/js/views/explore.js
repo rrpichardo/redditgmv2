@@ -1,7 +1,10 @@
 // explore.js — filters, evidence renderers, and the chart-heavy Explore view.
+// Also exports explorerView() which stitches explore + Q&A into the combined
+// Data Explorer tab, and bindExplorerEvents() which covers both filter and Q&A bindings.
 import { state, $, $$, esc, fmt, humanLabel, debounce } from "../state.js";
 import { chartPanel, metricGrid, emptyState } from "../components.js";
 import { loadRun } from "../app.js";
+import { qaView, startQaBuildIndex, refreshQaStatus, submitQaQuestion, submitQaSearch } from "./qa.js";
 
 // ---------------------------------------------------------------------------
 // Filters
@@ -221,4 +224,31 @@ export function exploreView() {
       <div class="panel-head"><h2>Evidence</h2><small>matched rows</small></div>
       ${evidenceTable(state.data.evidence)}
     </section>`;
+}
+
+// ---------------------------------------------------------------------------
+// Combined Data Explorer tab (explore + Q&A folded in at the bottom)
+// ---------------------------------------------------------------------------
+
+// explorerView stitches the full explore HTML with the Q&A section below a divider.
+export function explorerView() {
+  return `
+    ${exploreView()}
+    <hr style="margin: 2rem 0;" />
+    <section class="panel">
+      <div class="panel-head"><h2>Q&amp;A</h2><small>evidence-backed answers from your data</small></div>
+    </section>
+    ${qaView()}
+  `;
+}
+
+// bindExplorerEvents covers both the filter controls and the Q&A action buttons.
+export function bindExplorerEvents() {
+  // Filter bindings (already in bindFilterEvents — call that directly).
+  bindFilterEvents();
+  // Q&A bindings.
+  $("#qaBuildIndexBtn")?.addEventListener("click", startQaBuildIndex);
+  $("#qaRefreshBtn")?.addEventListener("click", refreshQaStatus);
+  $("#qaSubmitBtn")?.addEventListener("click", submitQaQuestion);
+  $("#qaSearchBtn")?.addEventListener("click", submitQaSearch);
 }

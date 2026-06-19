@@ -210,7 +210,12 @@ def load_runtime_frame(data_dir: Path) -> pd.DataFrame:
     posts = data_dir / "gm_posts.csv"
     comments = data_dir / "gm_comments.csv"
 
-    if combined.exists():
+    combined_mtime = combined.stat().st_mtime if combined.exists() else -1.0
+    split_mtime = max(
+        posts.stat().st_mtime if posts.exists() else -1.0,
+        comments.stat().st_mtime if comments.exists() else -1.0,
+    )
+    if combined.exists() and combined_mtime >= split_mtime:
         return _read_csv(combined)
     if posts.exists() and comments.exists():
         post_df = _read_csv(posts)
@@ -233,6 +238,8 @@ def load_runtime_frame(data_dir: Path) -> pd.DataFrame:
         return merged
     if posts.exists():
         return _read_csv(posts)
+    if comments.exists():
+        return _read_csv(comments)
     return pd.DataFrame()
 
 
@@ -596,6 +603,20 @@ def save_classified(df: pd.DataFrame, path: Path) -> Path:
 
 def load_classified(path: Path) -> pd.DataFrame:
     return ensure_label_columns(normalize_reddit_frame(_read_csv(path)))
+
+
+def load_working_classified(path: Path) -> pd.DataFrame:
+    """Load a prepared CSV without upgrading pending classifier modes to imported."""
+    raw = _read_csv(path)
+    original_modes = (
+        raw["classifier_mode"].fillna("").astype(str).tolist()
+        if "classifier_mode" in raw.columns
+        else None
+    )
+    frame = ensure_label_columns(normalize_reddit_frame(raw))
+    if original_modes is not None and len(original_modes) == len(frame):
+        frame.loc[:, "classifier_mode"] = original_modes
+    return frame
 
 
 def analyzed_frame(df: pd.DataFrame) -> pd.DataFrame:

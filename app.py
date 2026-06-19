@@ -5,8 +5,10 @@ from __future__ import annotations
 import io
 import json
 import math
+import mimetypes
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -21,9 +23,12 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from scripts.analyze_run import STEP_ORDER, retry_steps
+from src.briefing import write_briefing
 from src.charts import build_chart_payload, build_detail_data
 # Bare import so test mocks (patch "app.start_job", "app.find_active_job") resolve correctly
 from src.jobs import find_active_job, job_path, read_status, start_job
+from src.run_store import RunStore, latest_output_root
 from src.gm_insights import (
     MIN_CELL,
     ProviderConfig,
@@ -37,10 +42,8 @@ from src.gm_insights import (
     complaint_summary,
     ev_comparison,
     evidence_table,
-    fallback_synthesis,
     filter_analyzed,
     flag_summary,
-    generate_synthesis_with_llm,
     load_classified,
     load_runtime_frame,
     normalize_reddit_frame,
@@ -178,6 +181,26 @@ class QaAnswerRequest(BaseModel):
     k: int = 8
 
 
+class AnalyzeRequest(BaseModel):
+    tag: str = DEFAULT_TAG
+    provider: str = "openrouter"
+    model: str = "gpt-oss-120b"
+    api_key: str = ""
+    n_clusters: int = 10
+
+
+class PipelineCancelRequest(BaseModel):
+    tag: str = DEFAULT_TAG
+    run_id: str
+
+
+class PipelineRetryRequest(BaseModel):
+    tag: str = DEFAULT_TAG
+    run_id: str
+    step: str
+    api_key: str = ""
+
+
 def run_dir(tag: str) -> Path:
     return RUNTIME / clean_tag(tag)
 
@@ -186,12 +209,16 @@ def data_dir(tag: str) -> Path:
     return run_dir(tag) / "data"
 
 
+def output_dir(tag: str) -> Path:
+    return latest_output_root(RUNTIME, clean_tag(tag))
+
+
 def classified_path(tag: str) -> Path:
-    return run_dir(tag) / "classified" / "classified_posts.csv"
+    return output_dir(tag) / "classified" / "classified_posts.csv"
 
 
 def report_path(tag: str) -> Path:
-    return run_dir(tag) / "reports" / "gm_reddit_synthesis_report.md"
+    return output_dir(tag) / "reports" / "gm_reddit_synthesis_report.md"
 
 
 def collect_log_path(tag: str) -> Path:
@@ -203,7 +230,7 @@ def manifest_path(tag: str) -> Path:
 
 
 def download_dir(tag: str) -> Path:
-    return run_dir(tag) / "downloads"
+    return output_dir(tag) / "downloads"
 
 
 def clean_tag(tag: str) -> str:
@@ -420,7 +447,9 @@ def save_upload(tag: str, upload: UploadFile, df: pd.DataFrame) -> Path:
 
 def load_frame(tag: str) -> pd.DataFrame:
     cpath = classified_path(tag)
-    if cpath.exists():
+    raw_files = list(data_dir(tag).glob("*.csv")) if data_dir(tag).exists() else []
+    newest_raw_mtime = max((path.stat().st_mtime for path in raw_files), default=-1.0)
+    if cpath.exists() and cpath.stat().st_mtime >= newest_raw_mtime:
         return load_classified(cpath)
     raw = load_runtime_frame(data_dir(tag))
     if raw.empty:
@@ -612,6 +641,13 @@ def charts_detail(
 
 @app.post("/api/upload")
 def upload_csv(tag: str = DEFAULT_TAG, file: UploadFile = File(...)) -> JSONResponse:
+    tag = clean_tag(tag)
+    # Reject upload if the tag has an active pipeline run to prevent data races
+    with RunStore(RUNTIME / "runs.db") as store:
+        store.reconcile_tag_lock(tag)
+        lock = store.get_tag_lock(tag)
+    if lock:
+        raise HTTPException(status_code=409, detail={"error": "run_active", "message": f"Tag {tag!r} has an active run: {lock['run_id']}", "active_run_id": lock["run_id"]})
     df = read_upload(file)
     path = save_upload(tag, file, df)
     return safe_json({"ok": True, "path": str(path), "kind": classify_upload_kind(df), "rows": len(df)})
@@ -623,6 +659,12 @@ def collect_data(request: CollectRequest) -> JSONResponse:
         raise HTTPException(status_code=400, detail=f"Collector folder not found: {LEGACY_ROOT}")
 
     tag = clean_tag(request.tag)
+    # Reject collect if the tag has an active pipeline run to prevent data races
+    with RunStore(RUNTIME / "runs.db") as store:
+        store.reconcile_tag_lock(tag)
+        lock = store.get_tag_lock(tag)
+    if lock:
+        raise HTTPException(status_code=409, detail={"error": "run_active", "message": f"Tag {tag!r} has an active run: {lock['run_id']}", "active_run_id": lock["run_id"]})
     active = COLLECT_JOBS.get(tag)
     if active and active.get("process") and active["process"].poll() is None:
         payload = collect_status_payload(tag, active.get("job_id", ""))
@@ -731,6 +773,13 @@ def preview_classify(request: ClassifyRequest) -> JSONResponse:
 
 @app.post("/api/classify/llm")
 def llm_classify(request: LlmClassifyRequest) -> JSONResponse:
+    tag = clean_tag(request.tag)
+    # Reject if the tag has an active pipeline run
+    with RunStore(RUNTIME / "runs.db") as store:
+        store.reconcile_tag_lock(tag)
+        lock = store.get_tag_lock(tag)
+    if lock:
+        raise HTTPException(status_code=409, detail={"error": "run_active", "message": f"Tag {tag!r} has an active run: {lock['run_id']}", "active_run_id": lock["run_id"]})
     df = load_frame(request.tag)
     if df.empty:
         raise HTTPException(status_code=400, detail="No source data is loaded for this run.")
@@ -755,24 +804,31 @@ def briefing(request: BriefingRequest) -> JSONResponse:
     df = load_frame(request.tag)
     if df.empty:
         raise HTTPException(status_code=400, detail="No data is loaded for this run.")
-    payload = summary_payload(df)
-    if request.use_llm:
-        report = generate_synthesis_with_llm(payload, provider_config(request.provider, request.model, request.api_key))
-    else:
-        report = fallback_synthesis(payload)
     path = report_path(request.tag)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Atomic write: temp file then replace so a partial write is never visible
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(report, encoding="utf-8")
-    os.replace(tmp, path)
-    return safe_json({"ok": True, "path": str(path), "report": report})
+    result = write_briefing(
+        df,
+        path,
+        provider=(
+            provider_config(request.provider, request.model, request.api_key)
+            if request.use_llm
+            else None
+        ),
+        use_llm=request.use_llm,
+        fallback_on_error=False,
+    )
+    return safe_json({"ok": True, "path": str(path), "report": result.report})
 
 
 @app.post("/api/classify/job")
 def classify_job(request: ClassifyJobRequest) -> JSONResponse:
     """Start a full-run LLM classify subprocess. Returns existing job if one is running."""
     tag = clean_tag(request.tag)
+    # Reject if the tag has an active pipeline run
+    with RunStore(RUNTIME / "runs.db") as store:
+        store.reconcile_tag_lock(tag)
+        lock = store.get_tag_lock(tag)
+    if lock:
+        raise HTTPException(status_code=409, detail={"error": "run_active", "message": f"Tag {tag!r} has an active run: {lock['run_id']}", "active_run_id": lock["run_id"]})
     # Check for an already-running job first — active job takes priority over CSV check
     active = find_active_job(RUNTIME, tag, "classify")
     if active:
@@ -969,6 +1025,12 @@ def download_briefing_pdf(tag: str = DEFAULT_TAG) -> Response:
 def trends_run(request: TrendJobRequest) -> JSONResponse:
     """Start a KMeans+FAISS clustering job. Returns existing job if one is running."""
     tag = clean_tag(request.tag)
+    # Reject if the tag has an active pipeline run
+    with RunStore(RUNTIME / "runs.db") as store:
+        store.reconcile_tag_lock(tag)
+        lock = store.get_tag_lock(tag)
+    if lock:
+        raise HTTPException(status_code=409, detail={"error": "run_active", "message": f"Tag {tag!r} has an active run: {lock['run_id']}", "active_run_id": lock["run_id"]})
     active = find_active_job(RUNTIME, tag, "trend")
     if active:
         return safe_json({**active, "started": False})
@@ -1144,6 +1206,12 @@ def download_trend_pdf(tag: str = DEFAULT_TAG) -> Response:
 def qa_build_index(request: QaBuildIndexRequest) -> JSONResponse:
     """Start a FAISS Q&A index build job. Returns existing job if one is running."""
     tag = clean_tag(request.tag)
+    # Reject if the tag has an active pipeline run
+    with RunStore(RUNTIME / "runs.db") as store:
+        store.reconcile_tag_lock(tag)
+        lock = store.get_tag_lock(tag)
+    if lock:
+        raise HTTPException(status_code=409, detail={"error": "run_active", "message": f"Tag {tag!r} has an active run: {lock['run_id']}", "active_run_id": lock["run_id"]})
     active = find_active_job(RUNTIME, tag, "faiss_qa")
     if active:
         return safe_json({**active, "started": False})
@@ -1246,6 +1314,234 @@ def qa_answer(request: QaAnswerRequest) -> JSONResponse:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Q&A error: {exc}") from exc
     return safe_json({"ok": True, "question": request.question, "answer": answer, "hits": hits})
+
+
+@app.post("/api/analyze")
+def analyze(request: AnalyzeRequest) -> JSONResponse:
+    """Launch the full analysis pipeline as a durable run in the SQLite ledger."""
+    tag = clean_tag(request.tag)
+    # Reclaim stale locks before checking, then reject if still held
+    with RunStore(RUNTIME / "runs.db") as store:
+        store.reconcile_tag_lock(tag)
+        lock = store.get_tag_lock(tag)
+    if lock:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "run_active", "message": f"Tag {tag!r} has an active run: {lock['run_id']}", "active_run_id": lock["run_id"]},
+        )
+
+    run_id = uuid.uuid4().hex
+    job_id = uuid.uuid4().hex
+    pcfg = provider_config(request.provider, request.model, request.api_key)
+
+    # API key goes into the subprocess env, never on the CLI
+    env: dict[str, str] = {}
+    if request.api_key:
+        env[pcfg.api_key_env] = request.api_key
+
+    extra_args = [
+        "--tag", tag,
+        "--runtime_root", str(RUNTIME),
+        "--run_id", run_id,
+        "--db_path", str(RUNTIME / "runs.db"),
+        "--provider", pcfg.provider,
+        "--base_url", pcfg.base_url,
+        "--model", pcfg.model,
+        "--api_key_env", pcfg.api_key_env,
+        "--n_clusters", str(max(2, request.n_clusters)),
+        "--job_id", job_id,
+    ]
+    status = start_job(RUNTIME, tag, "analyze", ROOT / "scripts" / "analyze_run.py", extra_args, env=env, cwd=ROOT)
+    return safe_json({"run_id": run_id, "job_id": status["job_id"]})
+
+
+@app.get("/api/pipeline/status")
+def pipeline_status(tag: str = DEFAULT_TAG, run_id: str = "") -> JSONResponse:
+    """Return the full status of one pipeline run including per-step details."""
+    tag = clean_tag(tag)
+    with RunStore(RUNTIME / "runs.db") as store:
+        run = store.get_run(run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found.")
+        steps_rows = store.get_steps(run_id, STEP_ORDER)
+        # Build per-step dicts with artifact URLs and log availability
+        steps = []
+        for row in steps_rows:
+            step = row["name"]
+            attempts = store.get_attempts(run_id, step)
+            latest = attempts[-1] if attempts else None
+            # Map attempt artifacts to API-friendly shapes
+            artifacts = []
+            if latest:
+                for i, a in enumerate(latest.get("artifacts", [])):
+                    apath = Path(a["path"])
+                    artifacts.append({
+                        "id": f"{step}-{i}",
+                        "name": apath.name,
+                        "bytes": apath.stat().st_size if apath.exists() else 0,
+                        "url": f"/api/pipeline/artifact?tag={tag}&run_id={run_id}&step={step}&id={i}",
+                    })
+            # Log is available if the latest attempt has a non-empty log file
+            log_available = False
+            if latest and latest.get("log_path"):
+                lpath = Path(latest["log_path"])
+                log_available = lpath.exists() and lpath.stat().st_size > 0
+            steps.append({
+                "name": step,
+                "state": row["state"],
+                "started_at": row["started_at"],
+                "ended_at": row["ended_at"],
+                "processed": row["processed"],
+                "total": row["total"],
+                "errors": row["errors"],
+                "error_rate": row["error_rate"],
+                "warning": row["warning"],
+                "artifacts": artifacts,
+                "log_available": log_available,
+            })
+    return safe_json({**run, "steps": steps})
+
+
+@app.get("/api/pipeline/runs")
+def pipeline_runs(tag: str = DEFAULT_TAG, limit: int = 20) -> JSONResponse:
+    """List recent pipeline runs for a tag."""
+    tag = clean_tag(tag)
+    with RunStore(RUNTIME / "runs.db") as store:
+        runs = store.list_runs(tag, limit=min(limit, 100))
+    return safe_json(runs)
+
+
+@app.get("/api/pipeline/log")
+def pipeline_log(tag: str = DEFAULT_TAG, run_id: str = "", step: str = "") -> Response:
+    """Return the tail of the step log for the latest attempt."""
+    tag = clean_tag(tag)
+    with RunStore(RUNTIME / "runs.db") as store:
+        # Distinguish a missing run from a run that exists but has no attempts
+        if not store.get_run(run_id):
+            raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
+        attempts = store.get_attempts(run_id, step)
+    if not attempts:
+        raise HTTPException(status_code=404, detail=f"No attempts found for {run_id}/{step}.")
+    latest = attempts[-1]
+    log_path = latest.get("log_path")
+    if not log_path or not Path(log_path).exists():
+        raise HTTPException(status_code=404, detail="Log file not found.")
+    text = tail_text(Path(log_path))
+    return Response(content=text, media_type="text/plain")
+
+
+@app.get("/api/pipeline/artifact")
+def pipeline_artifact(tag: str = DEFAULT_TAG, run_id: str = "", step: str = "", id: str = "0") -> Response:
+    """Download a specific artifact by index from the latest attempt of a step."""
+    tag = clean_tag(tag)
+    with RunStore(RUNTIME / "runs.db") as store:
+        # Distinguish a missing run from a run that exists but has no attempts
+        if not store.get_run(run_id):
+            raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
+        attempts = store.get_attempts(run_id, step)
+    if not attempts:
+        raise HTTPException(status_code=404, detail="No attempts found.")
+    latest = attempts[-1]
+    artifacts = latest.get("artifacts", [])
+    try:
+        idx = int(id)
+        artifact = artifacts[idx]
+    except (ValueError, IndexError):
+        raise HTTPException(status_code=404, detail=f"Artifact index {id!r} not found.")
+    apath = Path(artifact["path"])
+    # Validate the artifact is under the snapshot directory for this specific run
+    # (runtime/<tag>/runs/<run_id>/), not just anywhere under runtime/<tag>/
+    snapshot_root = (RUNTIME / clean_tag(tag) / "runs" / run_id).resolve()
+    try:
+        apath.resolve().relative_to(snapshot_root)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    if not apath.exists():
+        raise HTTPException(status_code=404, detail="Artifact file not found on disk.")
+    content_type = mimetypes.guess_type(str(apath))[0] or "application/octet-stream"
+    return FileResponse(str(apath), media_type=content_type)
+
+
+@app.post("/api/pipeline/cancel")
+def pipeline_cancel(request: PipelineCancelRequest) -> JSONResponse:
+    """Cancel an active pipeline run by sending SIGTERM to its process."""
+    tag = clean_tag(request.tag)
+    with RunStore(RUNTIME / "runs.db") as store:
+        lock = store.get_tag_lock(tag)
+        # Only cancel if the lock matches the requested run_id
+        if not lock or lock["run_id"] != request.run_id:
+            return safe_json({"cancelled": False, "state": "not_active"})
+        # Find the running job and kill its process
+        active = find_active_job(RUNTIME, tag, "analyze")
+        if active:
+            pid = active.get("pid")
+            if pid:
+                try:
+                    os.kill(int(pid), signal.SIGTERM)
+                except OSError:
+                    pass
+        # Mark the run as cancelled in the ledger
+        try:
+            store.update_run(request.run_id, state="cancelled")
+        except KeyError:
+            pass
+        # Release the tag lock so the next run can start
+        store.release_tag_lock(tag, lock["owner_id"])
+    return safe_json({"cancelled": True, "state": "cancelled"})
+
+
+@app.post("/api/pipeline/retry")
+def pipeline_retry(request: PipelineRetryRequest) -> JSONResponse:
+    """Retry a failed/completed run from a specific step (re-runs the step and its dependents)."""
+    tag = clean_tag(request.tag)
+    # Check the tag writer lock first — refuse if another run is active for this tag
+    with RunStore(RUNTIME / "runs.db") as _lock_store:
+        _lock_store.reconcile_tag_lock(tag)
+        _active_lock = _lock_store.get_tag_lock(tag)
+    if _active_lock:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "run_active", "message": f"Tag {tag!r} has an active run: {_active_lock['run_id']}", "active_run_id": _active_lock["run_id"]},
+        )
+    if request.step not in STEP_ORDER:
+        raise HTTPException(status_code=400, detail=f"Unknown step {request.step!r}. Valid: {STEP_ORDER}")
+
+    with RunStore(RUNTIME / "runs.db") as store:
+        run = store.get_run(request.run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail=f"Run {request.run_id!r} not found.")
+        if run["state"] == "running":
+            raise HTTPException(status_code=400, detail="Run is still active; cancel it first.")
+        # Reset all affected steps to pending so the coordinator can re-run them
+        steps = retry_steps(request.step)
+        for s in steps:
+            store.upsert_step(request.run_id, s, state="pending")
+
+    # Determine provider from stored run config, fall back to defaults
+    run_config = run.get("config") or {}
+    pcfg = provider_config(
+        run_config.get("provider", "openrouter"),
+        run_config.get("model", "gpt-oss-120b"),
+        request.api_key,
+    )
+    env: dict[str, str] = {}
+    if request.api_key:
+        env[pcfg.api_key_env] = request.api_key
+
+    extra_args = [
+        "--tag", tag,
+        "--runtime_root", str(RUNTIME),
+        "--run_id", request.run_id,
+        "--db_path", str(RUNTIME / "runs.db"),
+        "--provider", pcfg.provider,
+        "--base_url", pcfg.base_url,
+        "--model", pcfg.model,
+        "--api_key_env", pcfg.api_key_env,
+        "--n_clusters", str(max(2, run_config.get("n_clusters", 10))),
+        "--retry-from-step", request.step,
+    ]
+    status = start_job(RUNTIME, tag, "analyze", ROOT / "scripts" / "analyze_run.py", extra_args, env=env, cwd=ROOT)
+    return safe_json({"run_id": request.run_id, "job_id": status["job_id"]})
 
 
 @app.get("/api/health")

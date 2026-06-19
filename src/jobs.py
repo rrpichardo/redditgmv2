@@ -25,7 +25,9 @@ from typing import Any
 HEARTBEAT_STALE_SECS = 120
 
 # All valid job kinds in this system
-JOB_KINDS = frozenset({"classify", "pdf_export", "trend", "trend_briefing", "faiss_qa"})
+JOB_KINDS = frozenset(
+    {"classify", "briefing", "pdf_export", "trend", "trend_briefing", "faiss_qa", "analyze"}
+)
 
 # States that mean the job is done (no longer active)
 _TERMINAL_STATES = frozenset({"completed", "failed", "interrupted"})
@@ -193,6 +195,7 @@ def start_job(
     extra_args: list[str],
     env: dict[str, str] | None = None,
     cwd: Path | None = None,
+    log_path: Path | None = None,
 ) -> dict:
     """Spawn a worker subprocess and write its initial status file.
 
@@ -205,6 +208,7 @@ def start_job(
     now = time.time()
 
     # Build the initial status dict before spawning so we have a clean baseline
+    resolved_log_path = Path(log_path) if log_path is not None else job_dir(runtime_root, tag) / f"{job_id}.log"
     initial_status: dict[str, Any] = {
         "job_id": job_id,
         "tag": tag,
@@ -219,6 +223,7 @@ def start_job(
         "updated_at": now,
         "completed_at": None,
         "artifact_paths": [],
+        "log_path": str(resolved_log_path),
     }
 
     status_path = job_path(runtime_root, tag, job_id)
@@ -236,15 +241,19 @@ def start_job(
         "--runtime_root", str(runtime_root),
     ] + extra_args
 
-    # Spawn the worker; inherit + extend the current environment
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(cwd) if cwd else None,
-        env={**os.environ, **(env or {})},
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    # Capture both streams in a durable log. The child inherits the descriptor,
+    # so closing the parent's handle after Popen does not interrupt logging.
+    resolved_log_path.parent.mkdir(parents=True, exist_ok=True)
+    with resolved_log_path.open("a", encoding="utf-8", buffering=1) as log_handle:
+        log_handle.write(f"[lifecycle] starting kind={kind} job_id={job_id}\n")
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            env={**os.environ, **(env or {})},
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+        )
 
     # Update the status file with the real PID and transition to "running"
     write_status(status_path, {"state": "running", "pid": proc.pid})

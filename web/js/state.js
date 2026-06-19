@@ -2,11 +2,19 @@
 
 // Mutable state bag shared across view modules.
 export const state = {
+  // Workspace identity
   tag: "gm_vehicle_on_demand",
   view: "dashboard",
   data: null,
   report: "",
   filters: {},
+
+  // Settings fields (were in the rail inputs; now managed by Settings tab)
+  provider: "openrouter",
+  model: "gpt-oss-120b",
+  apiKey: "",
+
+  // Job polling timers
   classifyJobStatus: null,
   exportJobStatus: null,
   collectPollTimer: null,
@@ -21,6 +29,11 @@ export const state = {
   qaHits: null,
   qaAnswer: null,
   qaPollTimer: null,
+
+  // Pipeline tracking (M2-frontend implements full UI)
+  pipelineRunId: null,
+  pipelinePollTimer: null,
+  pipelineRuns: [],
 };
 
 // Shorthand DOM selectors.
