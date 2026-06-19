@@ -7,6 +7,7 @@ import argparse
 import json
 import sys
 import time
+import traceback
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -25,6 +26,7 @@ def run_trend_briefing_job(
     model: str = "",
     api_key_env: str = "OPENROUTER_API_KEY",
     api_key: str = "",
+    output_root: Path | None = None,
 ) -> None:
     """Load cluster artifacts + trend signals, then render a trend briefing PDF."""
     status_path = job_path(runtime_root, tag, job_id)
@@ -35,10 +37,11 @@ def run_trend_briefing_job(
             fields["phase"] = note
         write_status(status_path, fields)
 
+    destination_root = Path(output_root) if output_root is not None else Path(runtime_root)
     try:
         heartbeat("loading_artifacts")
 
-        tdir = trends_dir(runtime_root, tag)
+        tdir = trends_dir(destination_root, tag)
         labels_path = tdir / "cluster_labels.json"
         examples_path = tdir / "cluster_examples.json"
         signals_path = tdir / "trend_signals.json"
@@ -56,7 +59,7 @@ def run_trend_briefing_job(
 
         from src.pdf_export import build_trend_briefing_pdf
 
-        downloads = runtime_root / tag / "downloads"
+        downloads = destination_root / tag / "downloads"
         downloads.mkdir(parents=True, exist_ok=True)
         pdf_path = downloads / f"{tag}_trend_briefing.pdf"
 
@@ -74,6 +77,7 @@ def run_trend_briefing_job(
         })
 
     except Exception as exc:
+        traceback.print_exc()
         write_status(status_path, {
             "state": "failed",
             "error": str(exc),
@@ -88,6 +92,7 @@ def main() -> None:
     parser.add_argument("--tag", required=True)
     parser.add_argument("--job_id", required=True)
     parser.add_argument("--runtime_root", required=True)
+    parser.add_argument("--output_root", default="")
 
     # LLM provider (optional — for future narrative generation)
     parser.add_argument("--provider", default="openrouter")
@@ -103,6 +108,7 @@ def main() -> None:
         provider=args.provider,
         model=args.model,
         api_key_env=args.api_key_env,
+        output_root=Path(args.output_root) if args.output_root else None,
     )
 
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+import traceback
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -24,6 +25,7 @@ def run_faiss_qa_job(
     classified_path: Path,
     provider: ProviderConfig,
     embedding_model: str = "text-embedding-3-small",
+    output_root: Path | None = None,
 ) -> None:
     """Load classified data, embed docs, build FAISS index, persist artifacts."""
     status_path = job_path(runtime_root, tag, job_id)
@@ -35,6 +37,7 @@ def run_faiss_qa_job(
             "total": total,
         })
 
+    destination_root = Path(output_root) if output_root is not None else Path(runtime_root)
     try:
         # Signal liveness immediately so reconcile doesn't mark us stale
         heartbeat()
@@ -44,7 +47,7 @@ def run_faiss_qa_job(
             tag=tag,
             df=df,
             provider=provider,
-            runtime_root=runtime_root,
+            runtime_root=destination_root,
             embedding_model=embedding_model,
             heartbeat_cb=heartbeat,
         )
@@ -57,6 +60,7 @@ def run_faiss_qa_job(
         })
 
     except Exception as exc:
+        traceback.print_exc()
         write_status(status_path, {
             "state": "failed",
             "error": str(exc),
@@ -75,6 +79,7 @@ def main() -> None:
 
     # Data
     parser.add_argument("--classified_path", required=True)
+    parser.add_argument("--output_root", default="")
 
     # Embedding model
     parser.add_argument("--embedding_model", default="text-embedding-3-small")
@@ -102,6 +107,7 @@ def main() -> None:
         classified_path=Path(args.classified_path),
         provider=provider,
         embedding_model=args.embedding_model,
+        output_root=Path(args.output_root) if args.output_root else None,
     )
 
 

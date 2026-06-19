@@ -419,7 +419,9 @@ def save_upload(tag: str, upload: UploadFile, df: pd.DataFrame) -> Path:
 
 def load_frame(tag: str) -> pd.DataFrame:
     cpath = classified_path(tag)
-    if cpath.exists():
+    raw_files = list(data_dir(tag).glob("*.csv")) if data_dir(tag).exists() else []
+    newest_raw_mtime = max((path.stat().st_mtime for path in raw_files), default=-1.0)
+    if cpath.exists() and cpath.stat().st_mtime >= newest_raw_mtime:
         return load_classified(cpath)
     raw = load_runtime_frame(data_dir(tag))
     if raw.empty:
