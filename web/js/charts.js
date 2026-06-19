@@ -261,6 +261,11 @@ export function mountViewCharts(root, payload) {
     const id = el.getAttribute("data-chart");
     const spec = specs[id];
     if (!spec) { el.innerHTML = `<div class="notice">Chart spec not found: ${esc(id)}.</div>`; return; }
+    // Lazy charts (heatmaps) load via a separate /api/charts/detail call; show placeholder until then.
+    if (spec.lazy && cdata[id] === undefined) {
+      el.innerHTML = `<div class="notice">Loading…</div>`;
+      return;
+    }
     renderChartInto(el, spec, cdata[id]);
   });
 }

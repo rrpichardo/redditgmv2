@@ -86,7 +86,8 @@ export function jobStatusCard(status) {
 }
 
 // chartPanel emits an empty ECharts mount point; charts.js fills it after render.
-export function chartPanel(id, title, note = "") {
-  const body = `<div class="echart" data-chart="${esc(id)}" role="img" aria-label="${esc(title)} chart" style="height:320px"></div>`;
+// height can be overridden for taller charts like heatmaps (default 320px).
+export function chartPanel(id, title, note = "", height = "320px") {
+  const body = `<div class="echart" data-chart="${esc(id)}" role="img" aria-label="${esc(title)} chart" style="height:${esc(height)}"></div>`;
   return panel(title, body, note, "chart-panel");
 }

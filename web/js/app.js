@@ -4,7 +4,7 @@ import { state, $, $$, fmt, fileSize, esc } from "./state.js";
 import { apiUrl, request } from "./api.js";
 import { setNotice, setBusy } from "./components.js";
 import { render, setView, handleSaveKindClick } from "./nav.js";
-import { bindResize } from "./charts.js";
+import { bindResize, renderChartInto } from "./charts.js";
 import { buildFilterParams, hasActiveFilters } from "./views/explore.js";
 import { collectProgressText, updateCollectUi, startCollectPolling } from "./views/collect.js";
 
@@ -36,6 +36,8 @@ export async function loadRun() {
 
     updateDownloads();
     render();
+    // Fire the lazy heatmap fetch in the background — doesn't block the main view.
+    if (state.view === "explorer") loadDetailCharts();
 
     if (collectStatus?.status === "running") {
       updateCollectUi(collectStatus);
@@ -45,6 +47,37 @@ export async function loadRun() {
     }
   } catch (error) {
     setNotice(error.message, "error");
+  }
+}
+
+// Fetch the two lazy heatmap charts (category_by_model + cooccurrence) after the main
+// view renders. Merges their data into state.data.chart_data and re-mounts just those elements.
+export async function loadDetailCharts() {
+  if (!state.data) return;
+  try {
+    const params = buildFilterParams();
+    const detail = await request(apiUrl("/api/charts/detail", { tag: state.tag, ...params }));
+    // /api/charts/detail returns {category_by_model, cooccurrence} directly — merge into chart_data.
+    if (detail && typeof detail === "object") {
+      Object.assign(state.data.chart_data, detail);
+    }
+    const root = $("#viewRoot");
+    if (!root) return;
+    const specs = state.data.chart_specs || {};
+    const cdata = state.data.chart_data || {};
+    for (const id of ["category_by_model", "cooccurrence"]) {
+      const el = root.querySelector(`[data-chart="${id}"]`);
+      const spec = specs[id];
+      if (el && spec) renderChartInto(el, spec, cdata[id]);
+    }
+  } catch {
+    // Non-critical: show a notice in the heatmap panels rather than crashing.
+    const root = $("#viewRoot");
+    if (!root) return;
+    for (const id of ["category_by_model", "cooccurrence"]) {
+      const el = root.querySelector(`[data-chart="${id}"]`);
+      if (el) el.innerHTML = `<div class="notice">Heavy charts unavailable.</div>`;
+    }
   }
 }
 

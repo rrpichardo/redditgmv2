@@ -1,7 +1,7 @@
 // nav.js — view registry, tab switching, render + ECharts mount pass, event binding.
 // Restructured for 5-tab IA: Dashboard, Data Explorer, Data Gathering, Pipeline, Settings.
 import { state, $, $$ } from "./state.js";
-import { mountViewCharts } from "./charts.js";
+import { mountViewCharts, disposeAll } from "./charts.js";
 import { saveExport, startExportJob, refreshExportJobStatus } from "./app.js";
 import { dashboard } from "./views/dashboard.js";
 import { explorerView, bindExplorerEvents } from "./views/explore.js";
@@ -27,6 +27,8 @@ const views = {
 
 export function render() {
   const root = $("#viewRoot");
+  // Dispose all live ECharts instances before replacing the DOM to prevent memory leaks.
+  disposeAll();
   root.innerHTML = (views[state.view] || (() => ""))();
   bindViewEvents();
   // Mount any [data-chart] panels via ECharts after HTML is in the DOM.
