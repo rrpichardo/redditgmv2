@@ -59,8 +59,8 @@ export function filterPanel() {
       `<option value="${esc(o)}" ${selected.includes(o) ? "selected" : ""}>${esc(o)}</option>`
     ).join("");
     return `<div class="filter-control">
-      <label class="filter-label">${esc(label)}</label>
-      <select id="filter-${key}" multiple size="3" class="filter-select" data-filter-key="${esc(apiKey)}">${opts_html}</select>
+      <label class="filter-label" for="filter-${key}">${esc(label)}</label>
+      <select id="filter-${key}" name="${esc(apiKey)}" multiple size="3" class="filter-select" data-filter-key="${esc(apiKey)}">${opts_html}</select>
     </div>`;
   };
 
@@ -69,14 +69,14 @@ export function filterPanel() {
   const maxDate = opts.dateEnd?.[0] || "";
   const dateRange = minDate || maxDate ? `
     <div class="filter-control">
-      <label class="filter-label">Date from</label>
-      <input id="filter-date-start" type="date" class="filter-input"
+      <label class="filter-label" for="filter-date-start">Date from</label>
+      <input id="filter-date-start" name="date_start" type="date" class="filter-input"
         value="${esc(f.date_start || "")}"
         min="${esc(minDate)}" max="${esc(maxDate)}">
     </div>
     <div class="filter-control">
-      <label class="filter-label">Date to</label>
-      <input id="filter-date-end" type="date" class="filter-input"
+      <label class="filter-label" for="filter-date-end">Date to</label>
+      <input id="filter-date-end" name="date_end" type="date" class="filter-input"
         value="${esc(f.date_end || "")}"
         min="${esc(minDate)}" max="${esc(maxDate)}">
     </div>` : "";
@@ -95,12 +95,12 @@ export function filterPanel() {
       ${opts.commentType?.length ? sel("commentType", "Comment type", opts.commentType, "comment_type") : ""}
       ${opts.competitor?.length ? sel("competitor", "Competitor", opts.competitor) : ""}
       <div class="filter-control">
-        <label class="filter-label">Search text</label>
-        <input id="filter-search" type="text" class="filter-input" value="${esc(f.search || "")}" placeholder="keyword…">
+        <label class="filter-label" for="filter-search">Search text</label>
+        <input id="filter-search" name="search" type="search" autocomplete="off" class="filter-input" value="${esc(f.search || "")}" placeholder="keyword…">
       </div>
       <div class="filter-control">
-        <label class="filter-label">Min score</label>
-        <input id="filter-minscore" type="number" class="filter-input" value="${f.min_score || ""}" placeholder="0">
+        <label class="filter-label" for="filter-minscore">Min score</label>
+        <input id="filter-minscore" name="min_score" type="number" inputmode="decimal" autocomplete="off" class="filter-input" value="${f.min_score || ""}" placeholder="0">
       </div>
       ${dateRange}
     </div>

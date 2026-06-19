@@ -3,7 +3,7 @@
 import { state, $, $$, fmt, fileSize, esc } from "./state.js";
 import { apiUrl, request } from "./api.js";
 import { setNotice, setBusy } from "./components.js";
-import { render, setView, handleSaveKindClick } from "./nav.js";
+import { render, setView, handleSaveKindClick, handleTabKeydown } from "./nav.js";
 import { bindResize, renderChartInto } from "./charts.js";
 import { buildFilterParams, hasActiveFilters } from "./views/explore.js";
 import { collectProgressText, updateCollectUi, startCollectPolling } from "./views/collect.js";
@@ -14,7 +14,7 @@ import { collectProgressText, updateCollectUi, startCollectPolling } from "./vie
 
 export async function loadRun() {
   // tag is now sourced from state (set in Settings tab) instead of a DOM input.
-  setNotice("Loading run...");
+  setNotice("Loading run…");
   try {
     const params = buildFilterParams();
     const [runResult, trendsResult, timeseriesResult] = await Promise.allSettled([
@@ -86,6 +86,8 @@ export async function loadDetailCharts() {
     for (const id of ["category_by_model", "cooccurrence"]) {
       const el = root.querySelector(`[data-chart="${id}"]`);
       if (el) el.innerHTML = `<div class="notice">Heavy charts unavailable.</div>`;
+      const table = root.querySelector(`[data-chart-table="${id}"]`);
+      if (table) table.innerHTML = `<p class="helper-text">Heavy chart data unavailable.</p>`;
     }
   }
 }
@@ -163,7 +165,7 @@ export async function saveExport(kind = "all") {
     ? [$("#saveZipBtn"), $("#saveZipPanelBtn")].filter(Boolean)
     : [];
   buttons.forEach((button) => setBusy(button, true, "Save ZIP"));
-  setNotice(`Saving ${labels[kind] || "export"}...`);
+  setNotice(`Saving ${labels[kind] || "export"}…`);
   try {
     const result = await request(apiUrl("/api/export/save", { tag: state.tag, kind }), {
       method: "POST",
@@ -260,7 +262,10 @@ function bindGlobalEvents() {
     target.addEventListener("click", handleSaveKindClick)
   );
   // Tab navigation — rail inputs removed; provider/model/api_key now live in Settings tab.
-  $$(".tab").forEach((tab) => tab.addEventListener("click", () => setView(tab.dataset.view)));
+  $$(".tab").forEach((tab) => {
+    tab.addEventListener("click", () => setView(tab.dataset.view));
+    tab.addEventListener("keydown", handleTabKeydown);
+  });
 }
 
 bindGlobalEvents();

@@ -15,7 +15,7 @@ export function gatheringView() {
         <div class="form-grid">
           <div class="control">
             <label for="uploadFile">Upload CSV</label>
-            <input id="uploadFile" type="file" accept=".csv" />
+            <input id="uploadFile" name="file" type="file" accept=".csv" />
             <small>Load a Reddit collector CSV from your machine.</small>
           </div>
         </div>
@@ -26,7 +26,7 @@ export function gatheringView() {
         <div class="form-grid">
           <div class="control">
             <label for="collectSource">Reddit source</label>
-            <select id="collectSource">
+            <select id="collectSource" name="source" autocomplete="off">
               <option value="gm">GM vehicle list</option>
               <option value="competitor">Competitor list</option>
               <option value="custom">Custom list</option>
@@ -35,7 +35,7 @@ export function gatheringView() {
           </div>
           <div class="control">
             <label for="listingLimit">Posts per subreddit</label>
-            <input id="listingLimit" type="number" min="1" max="500" value="100" />
+            <input id="listingLimit" name="listing_limit" type="number" inputmode="numeric" autocomplete="off" min="1" max="500" value="100" />
           </div>
         </div>
         <div class="actions">
@@ -102,7 +102,8 @@ export async function analyzeData() {
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       if (res.status === 409) {
-        setNotice(`A run is already active (run ${err.active_run_id || "unknown"}). Check the Pipeline tab.`, "warn");
+        const conflict = err.detail || err;
+        setNotice(`A run is already active (run ${conflict.active_run_id || "unknown"}). Check the Pipeline tab.`, "warn");
       } else {
         setNotice("Failed to start analysis. Check the Pipeline tab for details.", "error");
       }

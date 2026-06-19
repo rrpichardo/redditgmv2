@@ -25,6 +25,69 @@ function ensureTheme() {
 // Map from DOM element → ECharts instance so we can dispose on re-render.
 const instances = new Map();
 
+function displayCell(value) {
+  if (value === null || value === undefined || value === "") return "—";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+export function renderAccessibleTable(container, caption, columns, rows) {
+  if (!container) return;
+  const safeColumns = (columns || []).map(String);
+  const safeRows = (rows || []).slice(0, 40);
+  if (!safeColumns.length || !safeRows.length) {
+    container.innerHTML = `<p class="helper-text">No chart data available.</p>`;
+    return;
+  }
+  container.innerHTML = `<table class="chart-data-table">
+    <caption>${esc(caption)}</caption>
+    <thead><tr>${safeColumns.map((column) => `<th scope="col">${esc(humanLabel(column))}</th>`).join("")}</tr></thead>
+    <tbody>${safeRows.map((row) => `<tr>${safeColumns.map((column, index) =>
+      index === 0
+        ? `<th scope="row">${esc(displayCell(row[column]))}</th>`
+        : `<td>${esc(displayCell(row[column]))}</td>`
+    ).join("")}</tr>`).join("")}</tbody>
+  </table>`;
+}
+
+function chartTableModel(spec, data) {
+  if (Array.isArray(data)) {
+    const rows = data.slice(0, spec.type === "scatter" ? 40 : 20);
+    const columns = [];
+    for (const row of rows) {
+      for (const key of Object.keys(row || {})) {
+        if (!columns.includes(key) && typeof row[key] !== "object") columns.push(key);
+      }
+    }
+    return { columns, rows };
+  }
+  if (data?.rows && data?.columns && data?.values) {
+    const columns = ["category", ...data.columns];
+    const rows = data.rows.map((label, index) => Object.fromEntries([
+      ["category", label],
+      ...data.columns.map((column, colIndex) => [column, data.values[index]?.[colIndex]]),
+    ]));
+    return { columns, rows };
+  }
+  const keys = Object.keys(data || {});
+  if (keys.length && keys.every((key) => data[key] && typeof data[key] === "object")) {
+    return {
+      columns: ["category", ...keys],
+      rows: keys.map((rowKey) => ({ category: rowKey, ...data[rowKey] })),
+    };
+  }
+  return { columns: [], rows: [] };
+}
+
+function renderChartDataTable(el, spec, data) {
+  const id = el?.dataset?.chart;
+  if (!id) return;
+  const container = el.parentElement?.querySelector(`[data-chart-table="${id}"]`);
+  const model = chartTableModel(spec, data);
+  const caption = (el.getAttribute("aria-label") || `${id} chart`).replace(/ chart$/i, " data");
+  renderAccessibleTable(container, caption, model.columns, model.rows);
+}
+
 // Dispose the ECharts instance attached to el (if any) and remove it from the registry.
 export function disposeChart(el) {
   const inst = instances.get(el);
@@ -332,6 +395,7 @@ export function buildChartOption(spec, data) {
 export function renderChartInto(el, spec, data) {
   if (!el) return;
   disposeChart(el);
+  renderChartDataTable(el, spec, data);
   const rows = Array.isArray(data) ? data : [];
   const minRows = spec.minimum_rows == null ? 1 : spec.minimum_rows;
   if (spec.type !== "heatmap" && rows.length < minRows) {
@@ -344,7 +408,10 @@ export function renderChartInto(el, spec, data) {
   // Lazy-read reduced-motion preference at render time (not module load).
   const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
   const inst = echarts.init(el, THEME_NAME, { renderer: "canvas" });
-  inst.setOption(Object.assign({ animation: !reduceMotion }, option));
+  inst.setOption(Object.assign({
+    animation: !reduceMotion,
+    aria: { enabled: true, description: el.getAttribute("aria-label") || "Data chart" },
+  }, option));
   instances.set(el, inst);
 }
 
@@ -357,7 +424,10 @@ export function renderIntoEl(el, option) {
   // Read reduced-motion preference at render time (user may toggle it while app is open).
   const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
   const inst = echarts.init(el, THEME_NAME, { renderer: "canvas" });
-  inst.setOption(Object.assign({ animation: !reduceMotion }, option));
+  inst.setOption(Object.assign({
+    animation: !reduceMotion,
+    aria: { enabled: true, description: el.getAttribute("aria-label") || "Data chart" },
+  }, option));
   instances.set(el, inst);
 }
 

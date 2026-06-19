@@ -64,6 +64,7 @@ WEB = ROOT / "web"
 LEGACY_ROOT = Path(os.getenv("REDDITGM_LEGACY_ROOT", "/Users/ricopichardo/Claude/redditgm"))
 DEFAULT_TAG = "gm_vehicle_on_demand"
 COLLECT_JOBS: dict[str, dict[str, Any]] = {}
+PIPELINE_CHILD_JOB_KINDS = ("classify", "briefing", "trend", "trend_briefing", "faiss_qa")
 
 PROVIDERS = {
     "openrouter": {
@@ -89,8 +90,78 @@ def _sanitize(obj: Any) -> Any:
     return obj
 
 
-def safe_json(data: Any) -> JSONResponse:
-    return JSONResponse(_sanitize(data))
+def safe_json(data: Any, *, status_code: int = 200) -> JSONResponse:
+    return JSONResponse(_sanitize(data), status_code=status_code)
+
+
+def run_active_response(tag: str, run_id: str) -> JSONResponse:
+    """Return the frozen top-level tag-lock conflict payload."""
+    return safe_json(
+        {
+            "error": "run_active",
+            "message": f"Tag {tag!r} has an active run: {run_id}",
+            "active_run_id": run_id,
+        },
+        status_code=409,
+    )
+
+
+def require_pipeline_run(store: RunStore, tag: str, run_id: str) -> dict[str, Any]:
+    """Load a run only when it belongs to the requested tag."""
+    run = store.get_run(run_id)
+    if not run or run["tag"] != tag:
+        raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found.")
+    return run
+
+
+def require_snapshot_path(tag: str, run_id: str, value: str | Path) -> Path:
+    """Resolve one persisted resource path inside its immutable run snapshot."""
+    path = Path(value).resolve()
+    snapshot_root = (RUNTIME / tag / "runs" / run_id).resolve()
+    try:
+        path.relative_to(snapshot_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Pipeline resource not found.") from exc
+    return path
+
+
+def cancel_run_steps(store: RunStore, run_id: str) -> None:
+    """Project unfinished steps and the active immutable attempt to cancelled."""
+    for step in store.get_steps(run_id, STEP_ORDER):
+        if step["state"] == "running":
+            attempts = store.get_attempts(run_id, step["name"])
+            latest = attempts[-1] if attempts else None
+            if latest and latest["state"] == "running":
+                store.finish_attempt(
+                    run_id,
+                    step["name"],
+                    latest["attempt_no"],
+                    state="cancelled",
+                    processed=latest["processed"],
+                    total=latest["total"],
+                    errors=latest["errors"],
+                    error_rate=latest["error_rate"],
+                    warning="Cancelled by user.",
+                    artifacts=latest["artifacts"],
+                    metadata=latest["metadata"],
+                )
+                continue
+        if step["state"] in {"pending", "running"}:
+            store.upsert_step(
+                run_id,
+                step["name"],
+                state="cancelled",
+                attempt_no=step["attempt_no"],
+                started_at=step["started_at"],
+                ended_at=time.time(),
+                processed=step["processed"],
+                total=step["total"],
+                errors=step["errors"],
+                error_rate=step["error_rate"],
+                log_path=step["log_path"],
+                warning="Cancelled by user.",
+                artifacts=step["artifacts"],
+            )
 
 
 app = FastAPI(title="redditgm v2", version="2.0.0")
@@ -655,7 +726,7 @@ def charts_detail(
     df = load_frame(tag)
     filters = request_filters(sentiment, vehicle, subreddit, severity, comment_type, competitor, search, min_score, date_start, date_end)
     selected = filter_analyzed(df, filters) if not df.empty else pd.DataFrame()
-    return JSONResponse(build_detail_data(selected))
+    return safe_json(build_detail_data(selected))
 
 
 @app.post("/api/upload")
@@ -1394,10 +1465,7 @@ def analyze(request: AnalyzeRequest) -> JSONResponse:
         store.reconcile_tag_lock(tag)
         lock = store.get_tag_lock(tag)
     if lock:
-        raise HTTPException(
-            status_code=409,
-            detail={"error": "run_active", "message": f"Tag {tag!r} has an active run: {lock['run_id']}", "active_run_id": lock["run_id"]},
-        )
+        return run_active_response(tag, lock["run_id"])
 
     run_id = uuid.uuid4().hex
     job_id = uuid.uuid4().hex
@@ -1429,9 +1497,7 @@ def pipeline_status(tag: str = DEFAULT_TAG, run_id: str = "") -> JSONResponse:
     """Return the full status of one pipeline run including per-step details."""
     tag = clean_tag(tag)
     with RunStore(RUNTIME / "runs.db") as store:
-        run = store.get_run(run_id)
-        if not run:
-            raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found.")
+        run = require_pipeline_run(store, tag, run_id)
         steps_rows = store.get_steps(run_id, STEP_ORDER)
         # Build per-step dicts with artifact URLs and log availability
         steps = []
@@ -1486,16 +1552,18 @@ def pipeline_log(tag: str = DEFAULT_TAG, run_id: str = "", step: str = "") -> Re
     tag = clean_tag(tag)
     with RunStore(RUNTIME / "runs.db") as store:
         # Distinguish a missing run from a run that exists but has no attempts
-        if not store.get_run(run_id):
-            raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
+        require_pipeline_run(store, tag, run_id)
         attempts = store.get_attempts(run_id, step)
     if not attempts:
         raise HTTPException(status_code=404, detail=f"No attempts found for {run_id}/{step}.")
     latest = attempts[-1]
     log_path = latest.get("log_path")
-    if not log_path or not Path(log_path).exists():
+    if not log_path:
         raise HTTPException(status_code=404, detail="Log file not found.")
-    text = tail_text(Path(log_path))
+    safe_log_path = require_snapshot_path(tag, run_id, log_path)
+    if not safe_log_path.is_file():
+        raise HTTPException(status_code=404, detail="Log file not found.")
+    text = tail_text(safe_log_path)
     return Response(content=text, media_type="text/plain")
 
 
@@ -1505,8 +1573,7 @@ def pipeline_artifact(tag: str = DEFAULT_TAG, run_id: str = "", step: str = "", 
     tag = clean_tag(tag)
     with RunStore(RUNTIME / "runs.db") as store:
         # Distinguish a missing run from a run that exists but has no attempts
-        if not store.get_run(run_id):
-            raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
+        require_pipeline_run(store, tag, run_id)
         attempts = store.get_attempts(run_id, step)
     if not attempts:
         raise HTTPException(status_code=404, detail="No attempts found.")
@@ -1514,18 +1581,13 @@ def pipeline_artifact(tag: str = DEFAULT_TAG, run_id: str = "", step: str = "", 
     artifacts = latest.get("artifacts", [])
     try:
         idx = int(id)
+        if idx < 0:
+            raise IndexError
         artifact = artifacts[idx]
     except (ValueError, IndexError):
         raise HTTPException(status_code=404, detail=f"Artifact index {id!r} not found.")
-    apath = Path(artifact["path"])
-    # Validate the artifact is under the snapshot directory for this specific run
-    # (runtime/<tag>/runs/<run_id>/), not just anywhere under runtime/<tag>/
-    snapshot_root = (RUNTIME / clean_tag(tag) / "runs" / run_id).resolve()
-    try:
-        apath.resolve().relative_to(snapshot_root)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Artifact not found")
-    if not apath.exists():
+    apath = require_snapshot_path(tag, run_id, artifact["path"])
+    if not apath.is_file():
         raise HTTPException(status_code=404, detail="Artifact file not found on disk.")
     content_type = mimetypes.guess_type(str(apath))[0] or "application/octet-stream"
     return FileResponse(str(apath), media_type=content_type)
@@ -1540,18 +1602,28 @@ def pipeline_cancel(request: PipelineCancelRequest) -> JSONResponse:
         # Only cancel if the lock matches the requested run_id
         if not lock or lock["run_id"] != request.run_id:
             return safe_json({"cancelled": False, "state": "not_active"})
-        # Find the running job and kill its process
-        active = find_active_job(RUNTIME, tag, "analyze")
-        if active:
-            pid = active.get("pid")
+        # Stop the coordinator and any active child worker so cancellation does
+        # not leave an orphan writing into this tag.
+        active_jobs = [find_active_job(RUNTIME, tag, "analyze")]
+        active_jobs.extend(
+            find_active_job(RUNTIME, tag, kind) for kind in PIPELINE_CHILD_JOB_KINDS
+        )
+        for active in active_jobs:
+            pid = active.get("pid") if active else None
             if pid:
                 try:
                     os.kill(int(pid), signal.SIGTERM)
                 except OSError:
                     pass
-        # Mark the run as cancelled in the ledger
+        # Mark the run and unfinished step projection as cancelled in the ledger.
+        cancel_run_steps(store, request.run_id)
         try:
-            store.update_run(request.run_id, state="cancelled")
+            store.update_run(
+                request.run_id,
+                state="cancelled",
+                ended_at=time.time(),
+                warning="Cancelled by user.",
+            )
         except KeyError:
             pass
         # Release the tag lock so the next run can start
@@ -1568,17 +1640,12 @@ def pipeline_retry(request: PipelineRetryRequest) -> JSONResponse:
         _lock_store.reconcile_tag_lock(tag)
         _active_lock = _lock_store.get_tag_lock(tag)
     if _active_lock:
-        raise HTTPException(
-            status_code=409,
-            detail={"error": "run_active", "message": f"Tag {tag!r} has an active run: {_active_lock['run_id']}", "active_run_id": _active_lock["run_id"]},
-        )
+        return run_active_response(tag, _active_lock["run_id"])
     if request.step not in STEP_ORDER:
         raise HTTPException(status_code=400, detail=f"Unknown step {request.step!r}. Valid: {STEP_ORDER}")
 
     with RunStore(RUNTIME / "runs.db") as store:
-        run = store.get_run(request.run_id)
-        if not run:
-            raise HTTPException(status_code=404, detail=f"Run {request.run_id!r} not found.")
+        run = require_pipeline_run(store, tag, request.run_id)
         if run["state"] == "running":
             raise HTTPException(status_code=400, detail="Run is still active; cancel it first.")
         # Reset all affected steps to pending so the coordinator can re-run them

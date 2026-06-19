@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import time
+import warnings
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -122,7 +123,9 @@ class TestClusterTimestamps:
             "source_id": ["a", "b"],
             "created_at_norm": ["not-a-date", "2024-01-01"],
         })
-        ts = _cluster_timestamps(["a", "b"], df)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            ts = _cluster_timestamps(["a", "b"], df)
         assert len(ts) == 1  # only the valid date
 
 

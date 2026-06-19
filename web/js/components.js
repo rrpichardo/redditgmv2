@@ -15,7 +15,7 @@ export function setNotice(message = "", type = "") {
 export function setBusy(button, busy, label) {
   if (!button) return;
   button.disabled = busy;
-  if (label) button.textContent = busy ? "Working..." : label;
+  if (label) button.textContent = busy ? "Working…" : label;
 }
 
 // Standard panel wrapper: title head + body + optional note + extra class.
@@ -85,9 +85,17 @@ export function jobStatusCard(status) {
   </div>`;
 }
 
+export function chartDataDetails(id, title) {
+  return `<details class="chart-data">
+    <summary>View data table for ${esc(title)}</summary>
+    <div class="chart-data-scroll" data-chart-table="${esc(id)}"></div>
+  </details>`;
+}
+
 // chartPanel emits an empty ECharts mount point; charts.js fills it after render.
 // height can be overridden for taller charts like heatmaps (default 320px).
 export function chartPanel(id, title, note = "", height = "320px") {
-  const body = `<div class="echart" data-chart="${esc(id)}" role="img" aria-label="${esc(title)} chart" style="height:${esc(height)}"></div>`;
+  const body = `<div class="echart" data-chart="${esc(id)}" role="img" aria-label="${esc(title)} chart" style="height:${esc(height)}"></div>
+    ${chartDataDetails(id, title)}`;
   return panel(title, body, note, "chart-panel");
 }

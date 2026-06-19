@@ -1,9 +1,9 @@
 // dashboard.js — signals-first landing: hero card, 2-col signal grid,
 // run metrics, and chart panels (3 existing + 4 new trend charts).
 import { state, esc, fmt, humanLabel } from "../state.js";
-import { panel, chartPanel, metricGrid, emptyState } from "../components.js";
+import { panel, chartPanel, chartDataDetails, metricGrid, emptyState } from "../components.js";
 import {
-  renderIntoEl, renderSparkline,
+  renderIntoEl, renderSparkline, renderAccessibleTable,
   buildQuadrantOption, buildLeaderboardOption,
   buildLineTimeseriesOption, buildStackedAreaOption,
 } from "../charts.js";
@@ -120,7 +120,7 @@ function signalGrid(clusters) {
       <span style="flex:1;font-weight:500;color:${dimColor}">${esc(humanLabel(label.short_label || `Cluster ${c.cluster_id}`))}</span>
       <span style="color:#64748b;font-size:11px">${esc(velText)}</span>
       ${sig.confidence_banner ? confBadge(sig.confidence_banner) : ""}
-      <div id="sparkline-${c.cluster_id}" style="width:80px;height:32px;flex-shrink:0"></div>
+      <div id="sparkline-${c.cluster_id}" aria-hidden="true" style="width:80px;height:32px;flex-shrink:0"></div>
     </div>`;
   });
   return `<div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:20px">${rows.join("")}</div>`;
@@ -139,11 +139,40 @@ export function mountDashboardCharts() {
   if (clusters) {
     // Mount the velocity × z-score quadrant scatter chart.
     const quadEl = document.getElementById("quadrantChart");
-    if (quadEl) renderIntoEl(quadEl, buildQuadrantOption(clusters));
+    if (quadEl) {
+      renderIntoEl(quadEl, buildQuadrantOption(clusters));
+      renderAccessibleTable(
+        document.querySelector('[data-chart-table="quadrantChart"]'),
+        "Velocity and Z-score data",
+        ["signal", "velocity", "z_score", "confidence"],
+        clusters
+          .filter((c) => c.trend_signal?.velocity?.valid && c.trend_signal?.zscore?.valid)
+          .map((c) => ({
+            signal: c.label?.short_label || `Cluster ${c.cluster_id}`,
+            velocity: c.trend_signal.velocity.velocity,
+            z_score: c.trend_signal.zscore.zscore,
+            confidence: c.trend_signal.confidence_banner,
+          })),
+      );
+    }
 
     // Mount the trend leaderboard bar chart.
     const lbEl = document.getElementById("leaderboardChart");
-    if (lbEl) renderIntoEl(lbEl, buildLeaderboardOption(clusters));
+    if (lbEl) {
+      renderIntoEl(lbEl, buildLeaderboardOption(clusters));
+      renderAccessibleTable(
+        document.querySelector('[data-chart-table="leaderboardChart"]'),
+        "Trend leaderboard data",
+        ["signal", "velocity", "confidence"],
+        clusters
+          .filter((c) => c.trend_signal?.velocity?.valid)
+          .map((c) => ({
+            signal: c.label?.short_label || `Cluster ${c.cluster_id}`,
+            velocity: c.trend_signal.velocity.velocity,
+            confidence: c.trend_signal.confidence_banner,
+          })),
+      );
+    }
 
     // Determine grid order (same logic as signalGrid) to find each cluster's DOM id.
     const noRising = !hasRising(clusters);
@@ -162,11 +191,32 @@ export function mountDashboardCharts() {
   if (tsd?.ok) {
     // Mount weekly negative-mention line chart.
     const negEl = document.getElementById("negTimeChart");
-    if (negEl) renderIntoEl(negEl, buildLineTimeseriesOption(tsd, "negative"));
+    if (negEl) {
+      renderIntoEl(negEl, buildLineTimeseriesOption(tsd, "negative"));
+      renderAccessibleTable(
+        document.querySelector('[data-chart-table="negTimeChart"]'),
+        "Negative mentions by week",
+        ["week", "negative"],
+        (tsd.buckets || []).map((week, index) => ({ week, negative: tsd.negative?.[index] })),
+      );
+    }
 
     // Mount weekly stacked-area sentiment chart.
     const sentEl = document.getElementById("sentTimeChart");
-    if (sentEl) renderIntoEl(sentEl, buildStackedAreaOption(tsd));
+    if (sentEl) {
+      renderIntoEl(sentEl, buildStackedAreaOption(tsd));
+      renderAccessibleTable(
+        document.querySelector('[data-chart-table="sentTimeChart"]'),
+        "Sentiment by week",
+        ["week", "positive", "neutral", "negative"],
+        (tsd.buckets || []).map((week, index) => ({
+          week,
+          positive: tsd.positive?.[index],
+          neutral: tsd.neutral?.[index],
+          negative: tsd.negative?.[index],
+        })),
+      );
+    }
   } else {
     // Show a graceful fallback if timeseries data isn't loaded yet.
     ["negTimeChart", "sentTimeChart"].forEach((id) => {
@@ -210,21 +260,25 @@ export function dashboard() {
     <div class="panel-grid two" style="margin-top:0.75rem">
       <section class="panel chart-panel">
         <div class="panel-head"><h3>Velocity × Z-score quadrant</h3><small>color = confidence</small></div>
-        <div id="quadrantChart" style="height:280px"></div>
+        <div id="quadrantChart" role="img" aria-label="Velocity by Z-score quadrant chart" style="height:280px"></div>
+        ${chartDataDetails("quadrantChart", "Velocity × Z-score quadrant")}
       </section>
       <section class="panel chart-panel">
         <div class="panel-head"><h3>Trend leaderboard</h3><small>by velocity</small></div>
-        <div id="leaderboardChart" style="height:280px"></div>
+        <div id="leaderboardChart" role="img" aria-label="Trend leaderboard chart" style="height:280px"></div>
+        ${chartDataDetails("leaderboardChart", "Trend leaderboard")}
       </section>
     </div>
     <div class="panel-grid two" style="margin-top:0.75rem">
       <section class="panel chart-panel">
         <div class="panel-head"><h3>Negative mentions over time</h3><small>weekly</small></div>
-        <div id="negTimeChart" style="height:220px"></div>
+        <div id="negTimeChart" role="img" aria-label="Negative mentions over time chart" style="height:220px"></div>
+        ${chartDataDetails("negTimeChart", "Negative mentions over time")}
       </section>
       <section class="panel chart-panel">
         <div class="panel-head"><h3>Sentiment over time</h3><small>weekly stacked</small></div>
-        <div id="sentTimeChart" style="height:220px"></div>
+        <div id="sentTimeChart" role="img" aria-label="Sentiment over time chart" style="height:220px"></div>
+        ${chartDataDetails("sentTimeChart", "Sentiment over time")}
       </section>
     </div>
     <div class="panel-grid" style="margin-top:0.75rem">
