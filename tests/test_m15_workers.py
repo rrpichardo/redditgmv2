@@ -13,6 +13,8 @@ from scripts.trend_briefing_job import run_trend_briefing_job
 from scripts.trend_job import run_trend_job
 from src.gm_insights import ProviderConfig, normalize_reddit_frame, save_classified
 from src.jobs import job_path, start_job, write_status
+from src.qa_retrieval import qa_dir
+from src.trend_insights import trends_dir
 
 
 def _provider() -> ProviderConfig:
@@ -220,3 +222,86 @@ def test_load_frame_prefers_newer_raw_upload_over_stale_classified(
 
     assert frame.iloc[0]["source_id"] == "new"
     assert frame.iloc[0]["classifier_mode"] == ""
+
+
+def test_load_frame_prefers_newer_posts_upload_over_older_combined_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(app, "RUNTIME", tmp_path / "runtime")
+    data_root = app.data_dir("gm")
+    data_root.mkdir(parents=True)
+    combined = data_root / "gm_posts_with_comments.csv"
+    pd.DataFrame(
+        [
+            {
+                "post_id": "old-post",
+                "post_title": "Old combined title",
+                "post_content": "Old combined body with sufficient evidence.",
+                "post_subreddit": "gm",
+                "comment_body": "Old combined comment with sufficient evidence.",
+            }
+        ]
+    ).to_csv(combined, index=False)
+    old_time = time.time() - 20
+    os.utime(combined, (old_time, old_time))
+    pd.DataFrame(
+        [
+            {
+                "id": "new-post",
+                "title": "New posts upload title",
+                "selftext": "New posts upload body with sufficient evidence.",
+                "subreddit": "gm",
+            }
+        ]
+    ).to_csv(data_root / "gm_posts.csv", index=False)
+
+    frame = app.load_frame("gm")
+
+    assert frame.iloc[0]["source_id"] == "new-post"
+
+
+def test_load_frame_reads_atomically_published_current_generation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(app, "RUNTIME", tmp_path / "runtime")
+    tag_root = app.RUNTIME / "gm"
+
+    legacy = normalize_reddit_frame(
+        pd.DataFrame(
+            [{"id": "old", "title": "Old title", "selftext": "Old body with sufficient evidence.", "subreddit": "gm"}]
+        )
+    )
+    legacy.loc[:, "classifier_mode"] = "llm"
+    save_classified(legacy, tag_root / "classified" / "classified_posts.csv")
+
+    generation = tag_root / "generations" / "run-new"
+    current = normalize_reddit_frame(
+        pd.DataFrame(
+            [{"id": "new", "title": "New title", "selftext": "New body with sufficient evidence.", "subreddit": "gm"}]
+        )
+    )
+    current.loc[:, "classifier_mode"] = "llm"
+    save_classified(current, generation / "classified" / "classified_posts.csv")
+    (tag_root / "current").symlink_to(Path("generations") / "run-new")
+
+    frame = app.load_frame("gm")
+
+    assert frame.iloc[0]["source_id"] == "new"
+
+
+def test_trends_dir_reads_atomically_published_current_generation(tmp_path: Path) -> None:
+    tag_root = tmp_path / "gm"
+    generation = tag_root / "generations" / "run-new"
+    generation.mkdir(parents=True)
+    (tag_root / "current").symlink_to(Path("generations") / "run-new")
+
+    assert trends_dir(tmp_path, "gm") == tag_root / "current" / "trends"
+
+
+def test_qa_dir_reads_atomically_published_current_generation(tmp_path: Path) -> None:
+    tag_root = tmp_path / "gm"
+    generation = tag_root / "generations" / "run-new"
+    generation.mkdir(parents=True)
+    (tag_root / "current").symlink_to(Path("generations") / "run-new")
+
+    assert qa_dir(tmp_path, "gm") == tag_root / "current" / "qa"

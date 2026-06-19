@@ -103,6 +103,43 @@ def test_briefing_worker_writes_status_to_runtime_and_artifact_to_output_root(
     assert not (runtime_root / "gm" / "reports").exists()
 
 
+def test_briefing_worker_does_not_treat_pending_rows_as_imported(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    output_root = tmp_path / "staging"
+    classified_path = tmp_path / "classified.csv"
+    pending = normalize_reddit_frame(
+        pd.DataFrame(
+            [
+                {
+                    "id": "pending-1",
+                    "title": "Pending row needs classification",
+                    "selftext": "This row has enough evidence but has not been classified yet.",
+                    "subreddit": "gm",
+                }
+            ]
+        )
+    )
+    assert pending["classifier_mode"].tolist() == [""]
+    save_classified(pending, classified_path)
+    status_path = job_path(runtime_root, "gm", "brief-pending")
+    write_status(status_path, {"state": "running", "kind": "briefing"})
+
+    run_briefing_job(
+        tag="gm",
+        job_id="brief-pending",
+        runtime_root=runtime_root,
+        classified_path=classified_path,
+        provider=_provider(),
+        output_root=output_root,
+        use_llm=False,
+    )
+
+    report = (output_root / "gm" / "reports" / "gm_reddit_synthesis_report.md").read_text()
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert "Analyzed 0 Reddit evidence rows" in report
+    assert status["processed"] == 0
+
+
 def test_app_briefing_route_is_an_adapter_over_shared_writer(tmp_path: Path) -> None:
     expected_path = tmp_path / "brief.md"
     shared_result = generate_briefing(_classified_frame(), use_llm=False)

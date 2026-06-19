@@ -25,6 +25,7 @@ from src.briefing import write_briefing
 from src.charts import build_chart_payload, build_detail_data
 # Bare import so test mocks (patch "app.start_job", "app.find_active_job") resolve correctly
 from src.jobs import find_active_job, job_path, read_status, start_job
+from src.run_store import latest_output_root
 from src.gm_insights import (
     MIN_CELL,
     ProviderConfig,
@@ -185,12 +186,16 @@ def data_dir(tag: str) -> Path:
     return run_dir(tag) / "data"
 
 
+def output_dir(tag: str) -> Path:
+    return latest_output_root(RUNTIME, clean_tag(tag))
+
+
 def classified_path(tag: str) -> Path:
-    return run_dir(tag) / "classified" / "classified_posts.csv"
+    return output_dir(tag) / "classified" / "classified_posts.csv"
 
 
 def report_path(tag: str) -> Path:
-    return run_dir(tag) / "reports" / "gm_reddit_synthesis_report.md"
+    return output_dir(tag) / "reports" / "gm_reddit_synthesis_report.md"
 
 
 def collect_log_path(tag: str) -> Path:
@@ -202,7 +207,7 @@ def manifest_path(tag: str) -> Path:
 
 
 def download_dir(tag: str) -> Path:
-    return run_dir(tag) / "downloads"
+    return output_dir(tag) / "downloads"
 
 
 def clean_tag(tag: str) -> str:

@@ -99,6 +99,15 @@ def run_staging_root(runtime_root: Path, tag: str, run_id: str) -> Path:
     )
 
 
+def latest_output_root(runtime_root: Path, tag: str) -> Path:
+    """Return the atomically published output generation, or the legacy tag root."""
+    tag_root = Path(runtime_root) / _safe_component(tag, "tag")
+    current = tag_root / "current"
+    if current.is_symlink() or current.exists():
+        return current
+    return tag_root
+
+
 def _scrub_secrets(value: Any) -> Any:
     if isinstance(value, dict):
         clean: dict[str, Any] = {}

@@ -37,6 +37,7 @@ except ImportError:
     HAS_SKLEARN = False
 
 from src.gm_insights import ProviderConfig, analyzed_frame
+from src.run_store import latest_output_root
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -89,7 +90,7 @@ Respond with a JSON object:
 # ---------------------------------------------------------------------------
 
 def trends_dir(runtime_root: Path, tag: str) -> Path:
-    return runtime_root / tag / "trends"
+    return latest_output_root(runtime_root, tag) / "trends"
 
 
 # ---------------------------------------------------------------------------

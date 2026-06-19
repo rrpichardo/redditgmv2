@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import shutil
 import sys
 import time
@@ -31,6 +32,7 @@ from src.run_store import (
     AttemptPaths,
     RunStore,
     ensure_attempt_layout,
+    latest_output_root,
     run_staging_root,
 )
 
@@ -43,6 +45,14 @@ DEPENDENCIES = {
 }
 _SUCCESS_STATES = {"completed", "completed_with_warnings"}
 _PUBLISH_FAMILIES = ("classified", "reports", "trends", "downloads", "qa")
+CLASSIFY_FAIL_ERROR_RATE = 0.5
+_FAMILY_PRODUCERS = {
+    "classified": "classify",
+    "reports": "briefing",
+    "trends": "trends",
+    "downloads": "trend_pdf",
+    "qa": "qa_index",
+}
 
 
 class ActiveRunError(RuntimeError):
@@ -97,6 +107,33 @@ class StepResult:
 
 
 ChildRunner = Callable[[str, "AnalysisCoordinator", AttemptPaths], StepResult]
+
+
+def terminate_worker(pid: int, *, grace_seconds: float = 2.0) -> None:
+    """Stop and reap a supervised child before staging or locks are released."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+
+    deadline = time.monotonic() + max(0.0, grace_seconds)
+    while time.monotonic() < deadline:
+        try:
+            reaped_pid, _status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if reaped_pid:
+            return
+        time.sleep(0.02)
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
 
 
 def retry_steps(step: str) -> list[str]:
@@ -235,6 +272,9 @@ def monitor_job(
         if state == "failed":
             return StepResult(state="failed", warning=str(status.get("error") or "Worker failed."))
         if state == "interrupted":
+            pid = status.get("pid")
+            if pid:
+                terminate_worker(int(pid))
             return StepResult(state="failed", warning="Worker interrupted (dead PID or stale heartbeat).")
 
         pid = status.get("pid")
@@ -522,10 +562,20 @@ class AnalysisCoordinator:
 
     def _apply_quality(self, step: str, result: StepResult) -> StepResult:
         if result.state == "completed" and result.errors:
-            result.state = "completed_with_warnings"
-            result.warning = result.warning or (
-                f"{result.errors} of {result.total} rows failed; successful rows were retained."
-            )
+            error_rate = result.errors / result.total if result.total else 1.0
+            if step == "classify" and (
+                result.processed == 0 or error_rate >= CLASSIFY_FAIL_ERROR_RATE
+            ):
+                result.state = "failed"
+                result.warning = result.warning or (
+                    f"Classification quality gate failed: {result.errors} of "
+                    f"{result.total} rows failed."
+                )
+            else:
+                result.state = "completed_with_warnings"
+                result.warning = result.warning or (
+                    f"{result.errors} of {result.total} rows failed; successful rows were retained."
+                )
         if step == "trends" and result.state in _SUCCESS_STATES:
             timestamp_warning = self.prepare_result.trend_warning if self.prepare_result else None
             if timestamp_warning:
@@ -706,30 +756,52 @@ class AnalysisCoordinator:
     def _publish_latest(self) -> None:
         tag_root = self.runtime_root / self.tag
         tag_root.mkdir(parents=True, exist_ok=True)
+        generations = tag_root / "generations"
+        generations.mkdir(parents=True, exist_ok=True)
+        generation_id = f"{self.run_id}-{uuid.uuid4().hex[:12]}"
+        temp_root = generations / f".{generation_id}.tmp"
+        generation_root = generations / generation_id
+        previous_root = latest_output_root(self.runtime_root, self.tag)
+
+        if temp_root.exists():
+            shutil.rmtree(temp_root)
+        temp_root.mkdir(parents=True)
+
         for family in _PUBLISH_FAMILIES:
             source = self.staging_tag_root / family
-            destination = tag_root / family
-            temp = tag_root / f".{family}.{self.run_id}.tmp"
-            backup = tag_root / f".{family}.{self.run_id}.backup"
-            if temp.exists():
-                shutil.rmtree(temp)
-            if backup.exists():
-                shutil.rmtree(backup)
-            if source.exists():
-                shutil.copytree(source, temp)
-            else:
-                temp.mkdir(parents=True)
-            (temp / ".run_id").write_text(self.run_id, encoding="utf-8")
-            try:
-                if destination.exists():
-                    os.replace(destination, backup)
-                os.replace(temp, destination)
-            except Exception:
-                if backup.exists() and not destination.exists():
-                    os.replace(backup, destination)
-                raise
-            if backup.exists():
-                shutil.rmtree(backup)
+            previous = previous_root / family
+            destination = temp_root / family
+            producer = self.store.get_step(self.run_id, _FAMILY_PRODUCERS[family])
+            should_publish = bool(producer and producer["state"] in _SUCCESS_STATES)
+
+            if previous.exists():
+                shutil.copytree(previous, destination)
+
+            if should_publish:
+                if not source.exists():
+                    raise FileNotFoundError(
+                        f"successful {producer['name']} step produced no {family} family"
+                    )
+                if family == "downloads" and destination.exists():
+                    shutil.copytree(source, destination, dirs_exist_ok=True)
+                else:
+                    if destination.exists():
+                        shutil.rmtree(destination)
+                    shutil.copytree(source, destination)
+                (destination / ".run_id").write_text(self.run_id, encoding="utf-8")
+
+        os.replace(temp_root, generation_root)
+        pointer_temp = tag_root / f".current.{generation_id}.tmp"
+        if pointer_temp.exists() or pointer_temp.is_symlink():
+            pointer_temp.unlink()
+        os.symlink(Path("generations") / generation_id, pointer_temp)
+        try:
+            os.replace(pointer_temp, tag_root / "current")
+        except Exception:
+            if pointer_temp.exists() or pointer_temp.is_symlink():
+                pointer_temp.unlink()
+            shutil.rmtree(generation_root, ignore_errors=True)
+            raise
 
 
 def main() -> None:

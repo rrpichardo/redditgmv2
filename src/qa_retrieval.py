@@ -30,6 +30,7 @@ except ImportError:
     HAS_FAISS = False
 
 from src.gm_insights import ProviderConfig
+from src.run_store import latest_output_root
 from src.trend_insights import (
     EMBEDDING_DIM,
     EMBEDDING_MODEL,
@@ -42,7 +43,7 @@ from src.trend_insights import (
 # ---------------------------------------------------------------------------
 
 def qa_dir(runtime_root: Path, tag: str) -> Path:
-    return runtime_root / tag / "qa"
+    return latest_output_root(runtime_root, tag) / "qa"
 
 
 # ---------------------------------------------------------------------------

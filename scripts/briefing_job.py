@@ -13,7 +13,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from src.briefing import write_briefing
-from src.gm_insights import ProviderConfig, load_classified
+from src.gm_insights import ProviderConfig, analyzed_frame, load_working_classified
 from src.jobs import job_path, write_status
 
 
@@ -37,7 +37,11 @@ def run_briefing_job(
     output_path = briefing_output_path(destination_root, tag)
     try:
         write_status(status_path, {"heartbeat_at": time.time(), "phase": "loading_classified"})
-        frame = load_classified(classified_path)
+        # Prepared working sets already contain the full label schema, so
+        # load_classified() would incorrectly upgrade pending blank modes to
+        # "imported". Preserve those blanks until classification completes.
+        frame = load_working_classified(classified_path)
+        analyzed_rows = len(analyzed_frame(frame))
         result = write_briefing(
             frame,
             output_path,
@@ -48,7 +52,7 @@ def run_briefing_job(
         fields = {
             "state": "completed",
             "completed_at": time.time(),
-            "processed": len(frame),
+            "processed": analyzed_rows,
             "total": len(frame),
             "artifact_paths": [str(output_path)],
             "used_llm": result.used_llm,

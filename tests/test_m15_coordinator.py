@@ -1,11 +1,13 @@
 import json
 import os
 import signal
+import time
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
+import scripts.analyze_run as analyze_run_module
 from scripts.analyze_run import (
     STEP_ORDER,
     ActiveRunError,
@@ -17,8 +19,8 @@ from scripts.analyze_run import (
     retry_steps,
 )
 from src.gm_insights import normalize_reddit_frame, save_classified
-from src.jobs import start_job
-from src.run_store import RunStore
+from src.jobs import HEARTBEAT_STALE_SECS, job_path, start_job, write_status
+from src.run_store import RunStore, latest_output_root
 
 
 def _raw_rows(count: int = 3, *, bad_timestamps: bool = False) -> pd.DataFrame:
@@ -148,8 +150,9 @@ def test_scripted_run_writes_complete_ledger_logs_snapshots_and_latest(tmp_path:
             assert attempt["artifacts"]
             for artifact in attempt["artifacts"]:
                 assert Path(artifact["path"]).exists()
-    assert (runtime_root / "gm" / "classified" / ".run_id").read_text() == "run-1"
-    assert (runtime_root / "gm" / "trends" / ".run_id").read_text() == "run-1"
+    output_root = latest_output_root(runtime_root, "gm")
+    assert (output_root / "classified" / ".run_id").read_text() == "run-1"
+    assert (output_root / "trends" / ".run_id").read_text() == "run-1"
     assert not (runtime_root / "gm" / "runs" / "run-1" / "staging").exists()
 
 
@@ -192,6 +195,33 @@ def test_killed_child_reconciles_to_failed(tmp_path: Path) -> None:
     assert "interrupted" in (result.warning or "")
 
 
+def test_stale_heartbeat_terminates_and_reaps_live_child(tmp_path: Path) -> None:
+    script = tmp_path / "sleeper.py"
+    script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+    runtime_root = tmp_path / "runtime"
+    status = start_job(runtime_root, "gm", "classify", script, [], cwd=tmp_path)
+    write_status(
+        job_path(runtime_root, "gm", status["job_id"]),
+        {"heartbeat_at": time.time() - HEARTBEAT_STALE_SECS - 1},
+    )
+
+    try:
+        result = monitor_job(runtime_root, "gm", status["job_id"], poll_interval=0.01)
+
+        assert result.state == "failed"
+        with pytest.raises(OSError):
+            os.kill(status["pid"], 0)
+    finally:
+        try:
+            os.kill(status["pid"], signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            os.waitpid(status["pid"], 0)
+        except (ChildProcessError, OSError):
+            pass
+
+
 def test_degraded_classify_marks_step_and_run_completed_with_warnings(tmp_path: Path) -> None:
     runtime_root = tmp_path / "runtime"
     _write_raw(runtime_root, "gm", _raw_rows(3))
@@ -225,6 +255,45 @@ def test_degraded_classify_marks_step_and_run_completed_with_warnings(tmp_path: 
         assert classify["state"] == "completed_with_warnings"
         assert classify["error_rate"] == pytest.approx(1 / 3)
         assert "1 of 3" in classify["warning"]
+
+
+def test_all_failed_classification_fails_step_and_blocks_dependents(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    _write_raw(runtime_root, "gm", _raw_rows(3))
+    called: list[str] = []
+
+    def all_failed(step, coordinator, paths):
+        called.append(step)
+        result = _successful_worker(step, coordinator, paths)
+        if step == "classify":
+            return StepResult(
+                state="completed",
+                processed=0,
+                total=3,
+                errors=3,
+                artifact_paths=result.artifact_paths,
+            )
+        return result
+
+    coordinator = AnalysisCoordinator(
+        runtime_root=runtime_root,
+        db_path=runtime_root / "runs.db",
+        tag="gm",
+        run_id="all-failed",
+        config=_config(),
+        child_runner=all_failed,
+    )
+
+    result = coordinator.run()
+
+    assert result["state"] == "failed"
+    assert called == ["classify"]
+    with RunStore(runtime_root / "runs.db") as store:
+        classify = store.get_step("all-failed", "classify")
+        assert classify["state"] == "failed"
+        assert classify["error_rate"] == 1.0
+        assert store.get_step("all-failed", "briefing")["state"] == "blocked"
+        assert store.get_step("all-failed", "qa_index")["state"] == "blocked"
 
 
 def test_bad_timestamps_warn_trends_while_other_steps_continue(tmp_path: Path) -> None:
@@ -335,3 +404,82 @@ def test_failed_run_never_overwrites_tag_latest(tmp_path: Path) -> None:
     assert result["state"] == "failed"
     assert (latest / "sentinel.txt").read_text(encoding="utf-8") == "previous generation"
     assert not (latest / ".run_id").exists()
+
+
+def test_missing_key_run_preserves_latest_for_blocked_families(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    tag_root = runtime_root / "gm"
+
+    old_classified = normalize_reddit_frame(_raw_rows(1))
+    old_classified.loc[:, "classifier_mode"] = "llm"
+    old_classified.loc[:, "sentiment"] = "negative"
+    old_path = tag_root / "classified" / "classified_posts.csv"
+    save_classified(old_classified, old_path)
+    os.utime(old_path, (1, 1))
+    for family in ("trends", "qa"):
+        family_root = tag_root / family
+        family_root.mkdir(parents=True)
+        (family_root / "sentinel.txt").write_text("previous-good", encoding="utf-8")
+
+    _write_raw(runtime_root, "gm", _raw_rows(2))
+    monkeypatch.delenv("MISSING_M15_KEY", raising=False)
+    coordinator = AnalysisCoordinator(
+        runtime_root=runtime_root,
+        db_path=runtime_root / "runs.db",
+        tag="gm",
+        run_id="no-key",
+        config=_config(api_key="", api_key_env="MISSING_M15_KEY"),
+        child_runner=_successful_worker,
+    )
+
+    result = coordinator.run()
+
+    assert result["state"] == "completed_with_warnings"
+    current = tag_root / "current"
+    assert current.is_symlink()
+    assert (current / "trends" / "sentinel.txt").read_text() == "previous-good"
+    assert (current / "qa" / "sentinel.txt").read_text() == "previous-good"
+    published = pd.read_csv(
+        current / "classified" / "classified_posts.csv",
+        dtype=str,
+        keep_default_na=False,
+    )
+    assert published["classifier_mode"].tolist() == ["llm"]
+
+
+def test_publish_pointer_failure_keeps_previous_generation_visible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    tag_root = runtime_root / "gm"
+    _write_raw(runtime_root, "gm", _raw_rows(3))
+    for family in ("classified", "reports", "trends", "downloads", "qa"):
+        family_root = tag_root / family
+        family_root.mkdir(parents=True, exist_ok=True)
+        (family_root / "old.txt").write_text("old-generation", encoding="utf-8")
+
+    original_replace = analyze_run_module.os.replace
+
+    def fail_pointer_swap(source: Path | str, destination: Path | str) -> None:
+        if Path(destination).name == "current":
+            raise OSError("forced pointer swap failure")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(analyze_run_module.os, "replace", fail_pointer_swap)
+    coordinator = AnalysisCoordinator(
+        runtime_root=runtime_root,
+        db_path=runtime_root / "runs.db",
+        tag="gm",
+        run_id="publish-fail",
+        config=_config(),
+        child_runner=_successful_worker,
+    )
+
+    result = coordinator.run()
+
+    assert result["state"] == "failed"
+    assert not (tag_root / "current").exists()
+    for family in ("classified", "reports", "trends", "downloads", "qa"):
+        assert (tag_root / family / "old.txt").read_text() == "old-generation"
