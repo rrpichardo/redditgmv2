@@ -20,7 +20,7 @@ POST /api/analyze
 GET /api/pipeline/status?tag=&run_id=
   200:  {
           run_id, tag,
-          state: <run-state>,                 # running | completed | completed_with_warnings | failed | cancelled
+          state: <run-state>,                 # running | completed | completed_with_warnings | blocked | failed | cancelled
           started_at, ended_at|null,
           config: { provider, model },
           steps: [ <step> ... ]               # ordered, see step list below
@@ -30,36 +30,83 @@ GET /api/pipeline/status?tag=&run_id=
           started_at|null, ended_at|null,
           processed, total, errors, error_rate,
           warning|null,                        # reason string when completed_with_warnings / blocked / skipped
-          artifact_paths: [str ...],           # run-scoped snapshot paths
+          artifacts: [ { id, name, bytes, url } ... ], # immutable run-scoped browser resources
           log_available: bool
         }
 
+GET /api/pipeline/runs?tag=&limit=
+  200:  [ { run_id, state, started_at, ended_at } ... ] # newest first
+
 GET /api/pipeline/log?tag=&run_id=&step=
   200:  text/plain (tail of the step log)
+
+GET /api/pipeline/artifact?tag=&run_id=&step=&id=
+  200:  immutable per-attempt artifact bytes
+  404:  missing artifact/run/step; path traversal and non-snapshot paths are rejected
 
 POST /api/pipeline/cancel
   req:  { tag, run_id }
   200:  { cancelled: bool, state }
 
 POST /api/pipeline/retry
-  req:  { tag, run_id, step }
-  200:  { run_id, job_id }                     # re-runs `step` + all downstream steps
+  req:  { tag, run_id, step, api_key? }
+  200:  { run_id, job_id }                     # re-runs `step` + dependency-map dependents
 ```
 
-**Canonical ordered step list** (linear dependency chain, hardcoded for V1):
+**Canonical ordered execution list** (sequential, hardcoded for V1):
 
 ```
 ["prepare", "classify", "briefing", "trends", "trend_pdf", "qa_index"]
 ```
 
-- `prepare` — normalize upload + heuristic seed; guards (0/1 row, timestamps, span, API key).
+- `prepare` — normalize upload into a working set while leaving analyzable rows pending
+  (`classifier_mode=""`); preserve rows already marked `llm`/`imported`; evaluate run/step guards.
 - `classify` — `scripts/classify_job.py`.
 - `briefing` — thin `scripts/briefing_job.py` over `src/gm_insights.py` synthesis.
 - `trends` — clustering **and** trend signals (one worker: `scripts/trend_job.py`).
 - `trend_pdf` — `scripts/trend_briefing_job.py`.
 - `qa_index` — `scripts/faiss_qa_job.py`.
 
-Retry-from-step invalidates and re-runs everything **after** the retried step in this order.
+Execution is sequential, but invalidation follows this hardcoded dependency map rather than the
+display order:
+
+```
+prepare  -> classify
+classify -> briefing, trends, qa_index
+trends   -> trend_pdf
+```
+
+Retry re-runs the selected step plus only its transitive dependents. For example, retrying `briefing`
+re-runs only `briefing`; retrying `classify` also re-runs `briefing`, `trends`, `trend_pdf`, and
+`qa_index`; retrying `trends` also re-runs `trend_pdf`. This is a hardcoded map, not a DAG engine.
+
+API keys use request override first and the provider environment variable second. Keys are passed to
+workers through their environment only and are never persisted in run config, SQLite, logs, or files.
+
+### Immutable attempts and publication
+
+Every attempt has an immutable filesystem location:
+
+```
+runtime/<tag>/runs/<run_id>/attempts/<step>/<attempt_no>/
+  artifacts/
+  step.log
+```
+
+The `steps` table is the latest-attempt projection; `attempts` rows and attempt logs/metadata are kept
+indefinitely. Heavy artifact blobs may be pruned by a configurable last-N policy. Workers write to the
+attempt's staging area. Only a successful step publishes its artifact family atomically to tag-level
+latest storage, tagged with the producing `run_id`; failed attempts never partially replace latest.
+
+Artifact IDs resolve only within the selected immutable attempt snapshot. API payloads never expose
+server filesystem paths.
+
+### Tag writer lock
+
+The SQLite `tag_locks` table permits one active writer per tag. Every mutating endpoint (`analyze`,
+upload, collect, manual classify/trends/Q&A, and retry) must acquire or honor this lock. Before rejecting
+a contender, lock acquisition reconciles a stale owner using PID liveness and heartbeat age. Active
+locks return the `409 run_active` response above.
 
 ---
 
@@ -80,6 +127,12 @@ Eight states. Maps onto / extends the existing child-job states in `src/jobs.py`
 | `cancelled` | yes | user cancelled | cancel endpoint stopped coordinator/child |
 
 A green "Done" means trustworthy. `completed_with_warnings` always carries a `warning` reason string.
+
+Run states are `running · completed · completed_with_warnings · blocked · failed · cancelled`.
+`blocked` means a run-level prerequisite (for example, zero analyzable rows) prevented useful execution.
+Step guards are evaluated per step: one analyzable row blocks `trends` and skips `trend_pdf` while other
+eligible steps continue; timestamp quality may downgrade `trends` to `completed_with_warnings`; missing
+effective credentials block LLM/embedding steps while deterministic fallback briefing may complete.
 
 ---
 
