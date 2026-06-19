@@ -17,7 +17,16 @@ export async function loadRun() {
   setNotice("Loading run...");
   try {
     const params = buildFilterParams();
-    state.data = await request(apiUrl("/api/run", { tag: state.tag, ...params }));
+    const [runResult, trendsResult, timeseriesResult] = await Promise.allSettled([
+      request(apiUrl("/api/run", { tag: state.tag, ...params })),
+      request(apiUrl("/api/trends", { tag: state.tag })),
+      request(apiUrl("/api/trends/timeseries", { tag: state.tag })),
+    ]);
+
+    if (runResult.status === "rejected") throw runResult.reason;
+    state.data = runResult.value;
+    state.trendsData = trendsResult.status === "fulfilled" ? trendsResult.value : null;
+    state.timeseriesData = timeseriesResult.status === "fulfilled" ? timeseriesResult.value : null;
 
     const collectStatus = await request(
       apiUrl("/api/collect/status", { tag: state.tag })

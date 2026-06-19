@@ -21,6 +21,7 @@ export const state = {
   classifyPollTimer: null,
   exportPollTimer: null,
   trendsData: null,
+  timeseriesData: null,
   trendJobStatus: null,
   trendBriefingJobStatus: null,
   trendPollTimer: null,
