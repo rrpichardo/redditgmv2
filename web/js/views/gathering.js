@@ -2,7 +2,7 @@
 // Combines the upload + Reddit collect actions from collect.js with a single
 // "Analyze data" button that fires the full pipeline in one API call.
 import { state, esc, $, fmt } from "../state.js";
-import { apiUrl, request } from "../api.js";
+import { apiUrl, request } from "../api.js"; // apiUrl needed for raw fetch in analyzeData
 import { setNotice, setBusy } from "../components.js";
 import { loadRun } from "../app.js";
 import { collect } from "./collect.js";   // reuse existing collect action
@@ -81,11 +81,15 @@ async function uploadFromGathering() {
 }
 
 // POST to /api/analyze to run the full pipeline in one call.
+// Uses raw fetch() instead of request() so that non-2xx responses (like 409)
+// are returned as a Response object rather than thrown — allowing us to inspect
+// the status and show the user a meaningful message.
 export async function analyzeData() {
   const btn = $("#analyzeBtn");
   setBusy(btn, true, "Analyze data");
   try {
-    const res = await request("/api/analyze", {
+    // Raw fetch so we get the Response back on 409 instead of an unhandled throw.
+    const res = await fetch(apiUrl("/api/analyze"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
