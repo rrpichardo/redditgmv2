@@ -237,3 +237,66 @@ def test_classify_job_blocked_when_run_active():
         assert detail["error"] == "run_active"
     finally:
         _release_lock(tag, owner)
+
+
+# ---------------------------------------------------------------------------
+# 9. POST /api/pipeline/retry — blocked when tag lock is held
+# ---------------------------------------------------------------------------
+
+def test_retry_blocked_when_run_active():
+    """retry is rejected with 409 when the tag lock is held by any active run."""
+    tag = f"test_retry_lock_{uuid.uuid4().hex[:8]}"
+    run_id = _make_run(tag, state="failed")
+    owner = _acquire_lock(tag, run_id)
+    try:
+        resp = client.post(
+            "/api/pipeline/retry",
+            json={"tag": tag, "run_id": run_id, "step": "classify"},
+        )
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        assert detail["error"] == "run_active"
+        assert detail["active_run_id"] == run_id
+    finally:
+        _release_lock(tag, owner)
+
+
+# ---------------------------------------------------------------------------
+# 10. GET /api/pipeline/artifact — rejects paths outside snapshot root
+# ---------------------------------------------------------------------------
+
+def test_artifact_rejects_non_snapshot_path():
+    """Artifact endpoint returns 404 when the stored path escapes the snapshot root."""
+    import json as _json
+
+    tag = f"test_artifact_traversal_{uuid.uuid4().hex[:8]}"
+    run_id = uuid.uuid4().hex
+    step = "classify"
+
+    # Create a run and a completed attempt whose artifact points to a data/ path
+    # that is under runtime/<tag>/ but NOT under runtime/<tag>/runs/<run_id>/
+    fake_artifact_path = str(app_module.RUNTIME / tag / "data" / "something.csv")
+
+    with _store() as store:
+        store.create_run(run_id, tag, config={}, state="completed")
+        store.upsert_step(run_id, step, state="completed")
+        # Inject an attempt row directly with the rogue artifact path.
+        # Use BEGIN IMMEDIATE / COMMIT because isolation_level=None means autocommit.
+        store._conn.execute("BEGIN IMMEDIATE")
+        store._conn.execute(
+            """
+            INSERT INTO attempts
+                (run_id, step, attempt_no, state, started_at, log_path, artifacts_json, metadata_json)
+            VALUES (?, ?, 1, 'completed', ?, '', ?, '{}')
+            """,
+            (
+                run_id,
+                step,
+                time.time(),
+                _json.dumps([{"path": fake_artifact_path, "name": "something.csv", "type": "csv"}]),
+            ),
+        )
+        store._conn.execute("COMMIT")
+
+    resp = client.get(f"/api/pipeline/artifact?tag={tag}&run_id={run_id}&step={step}&id=0")
+    assert resp.status_code == 404

@@ -1443,12 +1443,13 @@ def pipeline_artifact(tag: str = DEFAULT_TAG, run_id: str = "", step: str = "", 
     except (ValueError, IndexError):
         raise HTTPException(status_code=404, detail=f"Artifact index {id!r} not found.")
     apath = Path(artifact["path"])
-    # Validate the artifact is under the expected runtime directory (prevent path traversal)
-    allowed_root = (RUNTIME / clean_tag(tag)).resolve()
+    # Validate the artifact is under the snapshot directory for this specific run
+    # (runtime/<tag>/runs/<run_id>/), not just anywhere under runtime/<tag>/
+    snapshot_root = (RUNTIME / clean_tag(tag) / "runs" / run_id).resolve()
     try:
-        apath.resolve().relative_to(allowed_root)
+        apath.resolve().relative_to(snapshot_root)
     except ValueError:
-        raise HTTPException(status_code=400, detail="Path traversal detected.")
+        raise HTTPException(status_code=404, detail="Artifact not found")
     if not apath.exists():
         raise HTTPException(status_code=404, detail="Artifact file not found on disk.")
     content_type = mimetypes.guess_type(str(apath))[0] or "application/octet-stream"
@@ -1487,6 +1488,15 @@ def pipeline_cancel(request: PipelineCancelRequest) -> JSONResponse:
 def pipeline_retry(request: PipelineRetryRequest) -> JSONResponse:
     """Retry a failed/completed run from a specific step (re-runs the step and its dependents)."""
     tag = clean_tag(request.tag)
+    # Check the tag writer lock first — refuse if another run is active for this tag
+    with RunStore(RUNTIME / "runs.db") as _lock_store:
+        _lock_store.reconcile_tag_lock(tag)
+        _active_lock = _lock_store.get_tag_lock(tag)
+    if _active_lock:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "run_active", "message": f"Tag {tag!r} has an active run: {_active_lock['run_id']}", "active_run_id": _active_lock["run_id"]},
+        )
     if request.step not in STEP_ORDER:
         raise HTTPException(status_code=400, detail=f"Unknown step {request.step!r}. Valid: {STEP_ORDER}")
 
