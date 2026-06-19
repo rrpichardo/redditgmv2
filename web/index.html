@@ -30,16 +30,16 @@
         </section>
 
         <!-- 5-tab navigation replacing the previous 7 tabs -->
-        <nav class="tabs" aria-label="Primary">
-          <button class="tab is-active" data-view="dashboard">Dashboard</button>
-          <button class="tab" data-view="explorer">Data Explorer</button>
-          <button class="tab" data-view="gathering">Data Gathering</button>
-          <button class="tab" data-view="pipeline">Pipeline</button>
-          <button class="tab" data-view="settings">Settings</button>
+        <nav class="tabs" role="tablist" aria-label="Primary">
+          <button id="tab-dashboard" class="tab is-active" type="button" role="tab" aria-controls="viewRoot" aria-selected="true" tabindex="0" data-view="dashboard">Dashboard</button>
+          <button id="tab-explorer" class="tab" type="button" role="tab" aria-controls="viewRoot" aria-selected="false" tabindex="-1" data-view="explorer">Data Explorer</button>
+          <button id="tab-gathering" class="tab" type="button" role="tab" aria-controls="viewRoot" aria-selected="false" tabindex="-1" data-view="gathering">Data Gathering</button>
+          <button id="tab-pipeline" class="tab" type="button" role="tab" aria-controls="viewRoot" aria-selected="false" tabindex="-1" data-view="pipeline">Pipeline</button>
+          <button id="tab-settings" class="tab" type="button" role="tab" aria-controls="viewRoot" aria-selected="false" tabindex="-1" data-view="settings">Settings</button>
         </nav>
 
         <section id="statusBar" class="status-bar" aria-live="polite"></section>
-        <section id="viewRoot"></section>
+        <section id="viewRoot" role="tabpanel" aria-labelledby="tab-dashboard" tabindex="0"></section>
       </main>
     </div>
 

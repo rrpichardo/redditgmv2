@@ -19,44 +19,16 @@ const STEP_LABELS = {
 // Terminal states — stop polling once reached.
 const TERMINAL = new Set(["completed", "completed_with_warnings", "blocked", "failed", "cancelled"]);
 
-// ------------------------------------------------------------------
-// CSS — injected once into <head> to avoid duplicates.
-// ------------------------------------------------------------------
-function injectStyles() {
-  if (document.getElementById("pipeline-styles")) return;
-  const style = document.createElement("style");
-  style.id = "pipeline-styles";
-  style.textContent = `
-    .pipeline-toolbar { display:flex; gap:0.5rem; align-items:center; margin-bottom:1rem; }
-    .pipeline-toolbar select { flex:1; }
-    .step-card { border:1px solid var(--border,#ddd); border-radius:6px; padding:0.75rem 1rem; margin-bottom:0.6rem; }
-    .step-card-head { display:flex; align-items:center; gap:0.6rem; flex-wrap:wrap; }
-    .step-name { font-weight:600; flex:1; }
-    .step-meta { font-size:0.8rem; color:var(--text-muted,#666); }
-    .step-warning { font-size:0.8rem; color:#8a6000; margin-top:0.25rem; }
-    .step-actions { display:flex; gap:0.4rem; align-items:center; flex-wrap:wrap; margin-top:0.5rem; }
-    .artifact-chip { font-size:0.78rem; padding:0.15rem 0.5rem; border-radius:4px;
-      background:var(--surface2,#f0f0f0); text-decoration:none; color:inherit; }
-    .artifact-chip:hover { background:var(--surface3,#e0e0e0); }
-    .log-panel { margin-top:0.5rem; display:none; }
-    .log-panel.is-open { display:block; }
-    .log-panel pre { font-size:0.75rem; background:var(--surface,#f8f8f8);
-      border:1px solid var(--border,#ddd); border-radius:4px; padding:0.5rem;
-      max-height:260px; overflow-y:auto; white-space:pre-wrap; word-break:break-all; }
-    /* State badge colours */
-    .step-state-badge { font-size:0.72rem; font-weight:700; padding:0.15rem 0.5rem;
-      border-radius:4px; text-transform:uppercase; letter-spacing:0.03em; white-space:nowrap; }
-    .state-pending    { background:#e8e8e8; color:#555; }
-    .state-running    { background:#dbeafe; color:#1d4ed8; }
-    .state-completed  { background:#d1fae5; color:#2D8A4E; }
-    .state-completed-with-warnings { background:#fef3c7; color:#E09B2D; }
-    .state-blocked    { background:#ffe4cc; color:#C45C00; }
-    .state-skipped    { background:#f0f0f0; color:#888; }
-    .state-failed     { background:#fee2e2; color:#C0392B; }
-    .state-cancelled  { background:#f0f0f0; color:#666; }
-  `;
-  document.head.appendChild(style);
-}
+const STATE_META = {
+  pending: ["○", "Pending"],
+  running: ["◌", "Running"],
+  completed: ["✓", "Completed"],
+  completed_with_warnings: ["!", "Completed with warnings"],
+  blocked: ["⊘", "Blocked"],
+  skipped: ["–", "Skipped"],
+  failed: ["×", "Failed"],
+  cancelled: ["■", "Cancelled"],
+};
 
 // ------------------------------------------------------------------
 // Helpers
@@ -93,6 +65,7 @@ function stepCardHTML(step, runId) {
   const label = STEP_LABELS[name] || name;
   // Map state name to CSS class (replace underscores with hyphens).
   const stateClass = `state-${(step.state || "pending").replaceAll("_", "-")}`;
+  const [stateIcon, stateLabel] = STATE_META[step.state] || ["?", step.state || "Pending"];
 
   // Timing and throughput.
   const timing = step.started_at
@@ -121,7 +94,7 @@ function stepCardHTML(step, runId) {
   return `
     <div class="step-card" data-step-card="${esc(name)}">
       <div class="step-card-head">
-        <span class="step-state-badge ${stateClass}">${esc(step.state || "pending")}</span>
+        <span class="step-state-badge ${stateClass}"><span class="step-state-icon" aria-hidden="true">${esc(stateIcon)}</span><span>${esc(stateLabel)}</span></span>
         <span class="step-name">${esc(label)}</span>
         ${timing ? `<span class="step-meta">${esc(timing)}</span>` : ""}
         ${progress ? `<span class="step-meta">${esc(progress)}</span>` : ""}
@@ -157,8 +130,6 @@ function runOptionLabel(run) {
 // View template
 // ------------------------------------------------------------------
 export function pipelineView() {
-  injectStyles();
-
   // Build dropdown options from cached runs.
   const runsOptions = (state.pipelineRuns || []).map((run) =>
     `<option value="${esc(run.run_id)}" ${run.run_id === state.pipelineRunId ? "selected" : ""}>${esc(runOptionLabel(run))}</option>`
@@ -170,7 +141,7 @@ export function pipelineView() {
         <div class="panel-head"><h2>Pipeline</h2></div>
 
         <div class="pipeline-toolbar">
-          <select id="pipelineRunSelect" aria-label="Select pipeline run">
+          <select id="pipelineRunSelect" name="pipeline_run" autocomplete="off" aria-label="Select pipeline run">
             ${runsOptions || '<option value="">Loading runs…</option>'}
           </select>
           <button id="pipelineRefreshBtn" class="button" aria-label="Refresh pipeline status">Refresh</button>

@@ -100,9 +100,9 @@ def test_analyze_rejects_when_tag_lock_held():
         with patch("app.start_job", return_value={"job_id": "j2", "state": "running", "pid": 9999}):
             resp = client.post("/api/analyze", json={"tag": tag})
         assert resp.status_code == 409
-        detail = resp.json()["detail"]
-        assert detail["error"] == "run_active"
-        assert detail["active_run_id"] == run_id
+        conflict = resp.json()
+        assert conflict["error"] == "run_active"
+        assert conflict["active_run_id"] == run_id
     finally:
         _release_lock(tag, owner)
 
@@ -254,9 +254,9 @@ def test_retry_blocked_when_run_active():
             json={"tag": tag, "run_id": run_id, "step": "classify"},
         )
         assert resp.status_code == 409
-        detail = resp.json()["detail"]
-        assert detail["error"] == "run_active"
-        assert detail["active_run_id"] == run_id
+        conflict = resp.json()
+        assert conflict["error"] == "run_active"
+        assert conflict["active_run_id"] == run_id
     finally:
         _release_lock(tag, owner)
 

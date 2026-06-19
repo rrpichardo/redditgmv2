@@ -86,7 +86,7 @@ export function qaView() {
     <section class="panel" style="margin-bottom:1rem">
       <div class="panel-head"><h3>Ask a Question</h3></div>
       <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.5rem">
-        <input id="qaQuestionInput" type="text" placeholder="e.g. What are the most common Silverado transmission complaints?"
+        <input id="qaQuestionInput" name="question" type="search" autocomplete="off" aria-label="Question" placeholder="e.g. What are the most common Silverado transmission complaints…"
           style="flex:1;min-width:200px" />
         <button id="qaSubmitBtn" class="button primary">Ask (with answer)</button>
         <button id="qaSearchBtn" class="button">Search only</button>

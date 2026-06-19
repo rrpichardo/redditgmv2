@@ -2,7 +2,7 @@
 // Restructured for 5-tab IA: Dashboard, Data Explorer, Data Gathering, Pipeline, Settings.
 import { state, $, $$ } from "./state.js";
 import { mountViewCharts, disposeAll } from "./charts.js";
-import { saveExport, startExportJob, refreshExportJobStatus } from "./app.js";
+import { saveExport, startExportJob, refreshExportJobStatus, loadDetailCharts } from "./app.js";
 import { dashboard, mountDashboardCharts } from "./views/dashboard.js";
 import { explorerView, bindExplorerEvents } from "./views/explore.js";
 import { gatheringView, bindGatheringEvents } from "./views/gathering.js";
@@ -11,9 +11,33 @@ import { settingsView, bindSettingsEvents } from "./views/settings.js";
 
 export function setView(view) {
   state.view = view;
-  // Sync active class on tab buttons.
-  $$(".tab").forEach((tab) => tab.classList.toggle("is-active", tab.dataset.view === view));
+  // Sync visual and accessibility state for the single active tab.
+  $$(".tab").forEach((tab) => {
+    const active = tab.dataset.view === view;
+    tab.classList.toggle("is-active", active);
+    tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
+  });
+  const panel = $("#viewRoot");
+  panel?.setAttribute("aria-labelledby", `tab-${view}`);
   render();
+  if (view === "explorer") loadDetailCharts();
+}
+
+export function handleTabKeydown(event) {
+  const tabs = $$(".tab");
+  const current = tabs.indexOf(event.currentTarget);
+  if (current < 0) return;
+  let next = current;
+  if (event.key === "ArrowRight") next = (current + 1) % tabs.length;
+  else if (event.key === "ArrowLeft") next = (current - 1 + tabs.length) % tabs.length;
+  else if (event.key === "Home") next = 0;
+  else if (event.key === "End") next = tabs.length - 1;
+  else return;
+  event.preventDefault();
+  const target = tabs[next];
+  setView(target.dataset.view);
+  target.focus();
 }
 
 // Map data-view keys to render functions.
@@ -27,12 +51,22 @@ const views = {
 
 export function render() {
   const root = $("#viewRoot");
+  root.getAnimations().forEach((animation) => animation.cancel());
   disposeAll();  // release ECharts instances before wiping DOM
   root.innerHTML = (views[state.view] || (() => ""))();
   bindViewEvents();
   // Mount any [data-chart] panels via ECharts after HTML is in the DOM.
   mountViewCharts(root, state.data);
   mountDashboardCharts();
+  if (!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+    root.animate(
+      [
+        { opacity: 0.72, transform: "translateY(6px)" },
+        { opacity: 1, transform: "translateY(0)" },
+      ],
+      { duration: 200, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)" },
+    );
+  }
 }
 
 export function handleSaveKindClick(event) {

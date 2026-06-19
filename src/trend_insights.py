@@ -626,7 +626,11 @@ def _cluster_timestamps(source_ids: list[str], df: pd.DataFrame) -> pd.Series:
     if "source_id" not in df.columns or "created_at_norm" not in df.columns:
         return pd.Series([], dtype="datetime64[ns]")
     mask = df["source_id"].isin(set(source_ids))
-    ts = pd.to_datetime(df.loc[mask, "created_at_norm"], errors="coerce")
+    ts = pd.to_datetime(
+        df.loc[mask, "created_at_norm"],
+        errors="coerce",
+        format="mixed",
+    )
     return ts.dropna()
 
 

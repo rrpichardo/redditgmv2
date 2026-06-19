@@ -150,13 +150,15 @@ def test_all_tabs_no_console_errors(live_server, browser_page):
     # Updated for 5-tab IA (M1 restructure).
     page = browser_page
     errors = []
+    failed_responses = []
     page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
     page.on("pageerror", lambda e: errors.append(str(e)))
+    page.on("response", lambda r: failed_responses.append(f"{r.status} {r.url}") if r.status >= 400 else None)
     _load_app_with_data(page, live_server)
     for view in ["dashboard", "explorer", "gathering", "pipeline", "settings"]:
         page.click(f'.tab[data-view="{view}"]')
         page.wait_for_timeout(500)  # give each tab time to settle
-    assert errors == [], f"console/page errors: {errors}"
+    assert errors == [], f"console/page errors: {errors}; failed responses: {failed_responses}"
 
 
 def test_no_horizontal_overflow_three_viewports(live_server, browser_page):
