@@ -258,8 +258,8 @@ function managePoll(status) {
     return;
   }
 
-  // Already polling — do nothing.
-  if (state.pipelinePollTimer) return;
+  // Clear any existing poll before starting a fresh one (e.g. after switching runs).
+  clearPoll();
 
   state.pipelinePollTimer = setInterval(async () => {
     // Guard: stop polling if the Pipeline tab has been unmounted.
