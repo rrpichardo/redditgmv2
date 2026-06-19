@@ -261,7 +261,7 @@ function optLeaderboard(clusters) {
   const data = sorted.map((c) => ({
     // Convert velocity fraction to percentage points for readability.
     value: Number(((c.trend_signal.velocity.velocity ?? 0) * 100).toFixed(1)),
-    itemStyle: { color: confColor[c.trend_signal.confidence_banner] || "#94a3b8" },
+    itemStyle: { color: confColor[c.trend_signal?.confidence_banner] || "#94a3b8" },
   }));
   return {
     grid: { left: 8, right: 48, top: 8, bottom: 8, containLabel: true },
@@ -275,12 +275,13 @@ function optLeaderboard(clusters) {
 // Simple line chart for a single timeseries field in a tsd (time-series data) object.
 // tsd must have a `buckets` array of x-axis labels and a `[seriesKey]` array of values.
 function optLineTimeseries(tsd, seriesKey) {
+  const src = tsd || {};  // guard against null on first load
   return {
     grid: { left: 8, right: 24, top: 16, bottom: 8, containLabel: true },
-    xAxis: { type: "category", data: tsd.buckets || [], axisLabel: { rotate: 30, fontSize: 10 } },
+    xAxis: { type: "category", data: src.buckets || [], axisLabel: { rotate: 30, fontSize: 10 } },
     yAxis: { type: "value" },
     tooltip: { trigger: "axis" },
-    series: [{ type: "line", data: tsd[seriesKey] || [], smooth: true, areaStyle: { opacity: 0.12 } }],
+    series: [{ type: "line", data: src[seriesKey] || [], smooth: true, areaStyle: { opacity: 0.12 } }],
   };
 }
 
