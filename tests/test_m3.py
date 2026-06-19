@@ -128,6 +128,20 @@ def test_timeseries_per_cluster_counts():
     assert sum(bc["1"]) == 2
 
 
+def test_timeseries_single_week_returns_not_ok():
+    """Returns ok=False when all rows fall within a single calendar week."""
+    df = _make_classified([
+        {"source_id": "r1", "created_at_norm": "2024-01-10 08:00:00", "sentiment": "negative"},  # all in 2024-W02
+        {"source_id": "r2", "created_at_norm": "2024-01-11 09:00:00", "sentiment": "positive"},
+        {"source_id": "r3", "created_at_norm": "2024-01-12 10:00:00", "sentiment": "neutral"},
+    ])
+    _write_classified(df)
+    r = client.get(f"/api/trends/timeseries?tag={TAG}")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is False
+
+
 def test_timeseries_missing_classified_returns_not_ok():
     """Returns ok=False when no classified file exists for the tag."""
     r = client.get("/api/trends/timeseries?tag=nonexistent_tag_xyz")

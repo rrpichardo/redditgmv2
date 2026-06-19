@@ -33,6 +33,7 @@ from src.gm_insights import (
     MIN_CELL,
     ProviderConfig,
     all_complaint_mentions,
+    analyzed_frame,
     apply_labels,
     classify_preview,
     classify_upload_kind,
@@ -1134,7 +1135,6 @@ def trends_results(tag: str = DEFAULT_TAG) -> JSONResponse:
 @app.get("/api/trends/timeseries")
 def trends_timeseries(tag: str = DEFAULT_TAG) -> JSONResponse:
     """Return weekly bucketed sentiment counts from the classified dataset."""
-    from src.gm_insights import analyzed_frame  # local import — avoids circular deps at module load
     tag = clean_tag(tag)
     cpath = classified_path(tag)
     # Return ok=False (not 404) when data doesn't exist yet — caller handles gracefully
