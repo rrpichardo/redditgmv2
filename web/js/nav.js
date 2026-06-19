@@ -1,63 +1,35 @@
 // nav.js — view registry, tab switching, render + ECharts mount pass, event binding.
+// Restructured for 5-tab IA: Dashboard, Data Explorer, Data Gathering, Pipeline, Settings.
 import { state, $, $$ } from "./state.js";
 import { mountViewCharts } from "./charts.js";
 import { saveExport, startExportJob, refreshExportJobStatus } from "./app.js";
 import { dashboard } from "./views/dashboard.js";
-import { collectView, collect, upload } from "./views/collect.js";
-import {
-  classifyView,
-  previewClassify,
-  llmClassify,
-  startClassifyJob,
-  refreshClassifyJobStatus,
-} from "./views/classify.js";
-import { exploreView, bindFilterEvents } from "./views/explore.js";
-import { briefingView, briefing } from "./views/briefing.js";
-import {
-  trendsView,
-  loadTrends,
-  startTrendsJob,
-  refreshTrendsStatus,
-  startTrendBriefingJob,
-  refreshTrendBriefingStatus,
-} from "./views/trends.js";
-import {
-  qaView,
-  startQaBuildIndex,
-  refreshQaStatus,
-  submitQaQuestion,
-  submitQaSearch,
-} from "./views/qa.js";
+import { explorerView, bindExplorerEvents } from "./views/explore.js";
+import { gatheringView, bindGatheringEvents } from "./views/gathering.js";
+import { pipelineView, bindPipelineEvents } from "./views/pipeline.js";
+import { settingsView, bindSettingsEvents } from "./views/settings.js";
 
 export function setView(view) {
   state.view = view;
+  // Sync active class on tab buttons.
   $$(".tab").forEach((tab) => tab.classList.toggle("is-active", tab.dataset.view === view));
-  // Load trends data on first visit or tab switch
-  if (view === "trends") {
-    loadTrends().then(() => render());
-    // Also load job status if not already tracking
-    if (!state.trendPollTimer) refreshTrendsStatus();
-    if (!state.trendBriefingPollTimer) refreshTrendBriefingStatus();
-    return;
-  }
   render();
 }
 
+// Map data-view keys to render functions.
 const views = {
   dashboard,
-  collect: collectView,
-  classify: classifyView,
-  explore: exploreView,
-  briefing: briefingView,
-  trends: trendsView,
-  qa: qaView,
+  explorer: explorerView,
+  gathering: gatheringView,
+  pipeline: pipelineView,
+  settings: settingsView,
 };
 
 export function render() {
   const root = $("#viewRoot");
   root.innerHTML = (views[state.view] || (() => ""))();
   bindViewEvents();
-  // After HTML is in the DOM, mount any [data-chart] panels via ECharts.
+  // Mount any [data-chart] panels via ECharts after HTML is in the DOM.
   mountViewCharts(root, state.data);
 }
 
@@ -69,40 +41,14 @@ export function handleSaveKindClick(event) {
 }
 
 export function bindViewEvents() {
+  // data-jump buttons (e.g. empty-state "Open collection" now points to "gathering").
   $$("[data-jump]").forEach((button) => button.addEventListener("click", () => setView(button.dataset.jump)));
   $$("[data-save-export]").forEach((button) => button.addEventListener("click", () => saveExport("all")));
   $$("#viewRoot [data-save-kind]").forEach((target) => target.addEventListener("click", handleSaveKindClick));
 
-  // Collect
-  $("#collectBtn")?.addEventListener("click", collect);
-  $("#saveZipPanelBtn")?.addEventListener("click", () => saveExport("all"));
-  $("#uploadBtn")?.addEventListener("click", upload);
-
-  // Classify
-  $("#previewClassifyBtn")?.addEventListener("click", previewClassify);
-  $("#llmClassifyBtn")?.addEventListener("click", llmClassify);
-  $("#startClassifyJobBtn")?.addEventListener("click", startClassifyJob);
-  $("#refreshClassifyJobBtn")?.addEventListener("click", refreshClassifyJobStatus);
-
-  // Briefing / exports
-  $("#templateBriefBtn")?.addEventListener("click", () => briefing(false));
-  $("#llmBriefBtn")?.addEventListener("click", () => briefing(true));
-  $("#chartsZipBtn")?.addEventListener("click", () => startExportJob("charts"));
-  $("#briefingPdfBtn")?.addEventListener("click", () => startExportJob("briefing"));
-  $("#refreshExportBtn")?.addEventListener("click", refreshExportJobStatus);
-
-  // Trends (Phase 5)
-  $("#startTrendsBtn")?.addEventListener("click", startTrendsJob);
-  $("#refreshTrendsBtn")?.addEventListener("click", refreshTrendsStatus);
-  $("#trendBriefingBtn")?.addEventListener("click", startTrendBriefingJob);
-  $("#refreshTrendBriefingBtn")?.addEventListener("click", refreshTrendBriefingStatus);
-
-  // Q&A (Phase 6)
-  $("#qaBuildIndexBtn")?.addEventListener("click", startQaBuildIndex);
-  $("#qaRefreshBtn")?.addEventListener("click", refreshQaStatus);
-  $("#qaSubmitBtn")?.addEventListener("click", submitQaQuestion);
-  $("#qaSearchBtn")?.addEventListener("click", submitQaSearch);
-
-  // Filters (explore view)
-  bindFilterEvents();
+  // Per-view event binding — only the currently rendered view's elements exist in DOM.
+  bindSettingsEvents();
+  bindGatheringEvents();
+  bindPipelineEvents();
+  bindExplorerEvents();  // covers filters + Q&A buttons
 }

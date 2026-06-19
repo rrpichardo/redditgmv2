@@ -13,7 +13,7 @@ import { collectProgressText, updateCollectUi, startCollectPolling } from "./vie
 // ---------------------------------------------------------------------------
 
 export async function loadRun() {
-  state.tag = $("#tagInput").value.trim() || "gm_vehicle_on_demand";
+  // tag is now sourced from state (set in Settings tab) instead of a DOM input.
   setNotice("Loading run...");
   try {
     const params = buildFilterParams();
@@ -23,22 +23,16 @@ export async function loadRun() {
       apiUrl("/api/collect/status", { tag: state.tag })
     ).catch(() => null);
 
-    if (collectStatus?.status === "running") {
-      $("#collectorStatus").textContent = `running ${collectProgressText(collectStatus)}`;
-    } else {
-      $("#collectorStatus").textContent = state.data.status.legacy_collector_found
-        ? "ready"
-        : "missing";
-    }
-
     const analyzed = state.data.summary.metrics.analyzed_rows ?? 0;
     const total = state.data.summary.metrics.total_rows ?? 0;
     const filterNote = hasActiveFilters() ? " [filtered]" : "";
-    $("#runSubtitle").textContent =
-      `${state.data.tag} / ${fmt.format(total)} rows / ${fmt.format(analyzed)} analyzed / ` +
-      `${state.data.status.has_classified ? "classified" : "source only"}${filterNote}`;
-    $("#railRows").textContent = `${fmt.format(total)} total`;
-    $("#railExports").textContent = state.data.status.has_source ? "ready" : "empty";
+    // Update the topband subtitle — the rail no longer exists.
+    const subtitle = $("#runSubtitle");
+    if (subtitle) {
+      subtitle.textContent =
+        `${state.data.tag} / ${fmt.format(total)} rows / ${fmt.format(analyzed)} analyzed / ` +
+        `${state.data.status.has_classified ? "classified" : "source only"}${filterNote}`;
+    }
 
     updateDownloads();
     render();
@@ -163,7 +157,8 @@ async function pollExportJobStatus(jobId = "") {
     const params = jobId ? { tag: state.tag, job_id: jobId } : { tag: state.tag };
     const status = await request(apiUrl("/api/export/status", params));
     state.exportJobStatus = status;
-    if (state.view === "briefing") render();
+    // "briefing" tab is removed; export polling now triggers a re-render on any view.
+    render();
     const done = ["completed", "failed", "interrupted"].includes(status.state);
     if (done) {
       clearExportPolling();
@@ -216,15 +211,13 @@ export async function refreshExportJobStatus() {
 // ---------------------------------------------------------------------------
 
 function bindGlobalEvents() {
+  // Refresh button in the topband.
   $("#refreshBtn").addEventListener("click", loadRun);
+  // Save ZIP chip in topband-primary (the export chips row is removed).
   $$(".top-actions [data-save-kind]").forEach((target) =>
     target.addEventListener("click", handleSaveKindClick)
   );
-  $("#tagInput").addEventListener("change", loadRun);
-  $("#providerSelect").addEventListener("change", () => {
-    $("#modelInput").value =
-      $("#providerSelect").value === "openai" ? "gpt-4o-mini" : "gpt-oss-120b";
-  });
+  // Tab navigation — rail inputs removed; provider/model/api_key now live in Settings tab.
   $$(".tab").forEach((tab) => tab.addEventListener("click", () => setView(tab.dataset.view)));
 }
 
