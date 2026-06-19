@@ -1416,6 +1416,9 @@ def pipeline_log(tag: str = DEFAULT_TAG, run_id: str = "", step: str = "") -> Re
     """Return the tail of the step log for the latest attempt."""
     tag = clean_tag(tag)
     with RunStore(RUNTIME / "runs.db") as store:
+        # Distinguish a missing run from a run that exists but has no attempts
+        if not store.get_run(run_id):
+            raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
         attempts = store.get_attempts(run_id, step)
     if not attempts:
         raise HTTPException(status_code=404, detail=f"No attempts found for {run_id}/{step}.")
@@ -1432,6 +1435,9 @@ def pipeline_artifact(tag: str = DEFAULT_TAG, run_id: str = "", step: str = "", 
     """Download a specific artifact by index from the latest attempt of a step."""
     tag = clean_tag(tag)
     with RunStore(RUNTIME / "runs.db") as store:
+        # Distinguish a missing run from a run that exists but has no attempts
+        if not store.get_run(run_id):
+            raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
         attempts = store.get_attempts(run_id, step)
     if not attempts:
         raise HTTPException(status_code=404, detail="No attempts found.")
