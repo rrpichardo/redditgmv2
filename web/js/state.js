@@ -9,6 +9,9 @@ export const state = {
   report: "",
   filters: {},
 
+  // Server config (loaded from /api/config on startup)
+  config: null,
+
   // Settings fields (were in the rail inputs; now managed by Settings tab)
   provider: "openrouter",
   model: "gpt-oss-120b",

@@ -72,7 +72,7 @@ async function uploadFromGathering() {
       body: form,
     });
     setNotice(`Loaded ${fmt.format(result.rows)} rows as ${result.kind}.`, "success");
-    await loadRun();
+    await loadRun({ silent: true });  // don't overwrite the success notice
   } catch (error) {
     setNotice(error.message, "error");
   } finally {
@@ -111,7 +111,7 @@ export async function analyzeData() {
     }
     const data = await res.json();
     state.pipelineRunId = data.run_id;
-    setNotice(`Analysis started (run ${data.run_id}). Watch progress in the Pipeline tab.`, "ok");
+    setNotice(`Analysis started (run ${data.run_id}). Watch progress in the Pipeline tab.`, "success");
     // Navigate to Pipeline so the user can watch progress.
     const { setView } = await import("../nav.js");
     setView("pipeline");

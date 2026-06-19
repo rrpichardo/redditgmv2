@@ -176,6 +176,24 @@ call findings directional rather than conclusive. Output only the markdown repor
 """
 
 
+def _get_classification_prompt() -> str:
+    try:
+        from src.app_config import load_config
+        p = load_config().get("prompts", {}).get("classification", "").strip()
+        return p if p else CLASSIFICATION_SYSTEM_PROMPT
+    except Exception:
+        return CLASSIFICATION_SYSTEM_PROMPT
+
+
+def _get_synthesis_prompt() -> str:
+    try:
+        from src.app_config import load_config
+        p = load_config().get("prompts", {}).get("synthesis", "").strip()
+        return p if p else SYNTHESIS_SYSTEM_PROMPT
+    except Exception:
+        return SYNTHESIS_SYSTEM_PROMPT
+
+
 @dataclass(frozen=True)
 class ProviderConfig:
     provider: str
@@ -550,7 +568,7 @@ def classify_with_llm(text: str, provider: ProviderConfig, max_retries: int = 2)
             response = client.chat.completions.create(
                 model=provider.model,
                 messages=[
-                    {"role": "system", "content": CLASSIFICATION_SYSTEM_PROMPT},
+                    {"role": "system", "content": _get_classification_prompt()},
                     {"role": "user", "content": f"Analyze the comment in this thread.\n\n{text}"},
                 ],
                 response_format={"type": "json_object"},
@@ -1021,7 +1039,7 @@ def generate_synthesis_with_llm(payload: dict[str, Any], provider: ProviderConfi
     response = client.chat.completions.create(
         model=provider.model,
         messages=[
-            {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
+            {"role": "system", "content": _get_synthesis_prompt()},
             {"role": "user", "content": json.dumps(payload, indent=2)},
         ],
         temperature=0.2,

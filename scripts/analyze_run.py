@@ -372,9 +372,11 @@ class AnalysisCoordinator:
             self._coordinator_status("running")
 
             # Retry path: if prepare is not in the steps to run, reconstruct PrepareResult
-            # from the working data files instead of re-running the prepare step.
+            # from the preserved prepare artifact and restore it into the (freshly emptied)
+            # staging dir so the retried child steps have their input file.
             if self.steps_to_run is not None and "prepare" not in self.steps_to_run:
                 self.prepare_result = self._load_prepare_result()
+                self._restore_staging_working_set()
             else:
                 self.prepare_result = self._execute_prepare()
             if self.prepare_result.analyzable_rows == 0:
@@ -450,16 +452,54 @@ class AnalysisCoordinator:
             return existing, existing
         return load_runtime_frame(data_root), None
 
-    def _load_prepare_result(self) -> PrepareResult:
-        """Reconstruct a PrepareResult from the working classified file without re-running prepare.
+    def _prepare_artifact_path(self) -> Path | None:
+        """Locate this run's own preserved prepare artifact, if any.
 
-        Used in retry mode when 'prepare' is not in steps_to_run. Reads whatever CSV
-        exists in the published output root (not staging) to derive row counts.
+        Prepare snapshots its classified CSV into the immutable attempts tree, which
+        survives the staging cleanup at the end of each run invocation. This is the
+        source of truth on retry — the published file only exists once a run completes.
+        """
+        attempts_root = self.runtime_root / self.tag / "runs" / self.run_id / "attempts" / "prepare"
+        if not attempts_root.exists():
+            return None
+        # Highest-numbered attempt dir wins (latest prepare run).
+        attempt_dirs = sorted(
+            (p for p in attempts_root.iterdir() if p.is_dir() and p.name.isdigit()),
+            key=lambda p: int(p.name),
+            reverse=True,
+        )
+        for attempt_dir in attempt_dirs:
+            candidate = attempt_dir / "artifacts" / "classified" / "classified_posts.csv"
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _restore_staging_working_set(self) -> None:
+        """Copy the preserved prepare artifact into staging for retried child steps.
+
+        Staging is wiped at the end of every run invocation, so a retry starts with an
+        empty staging dir. Child steps (classify, etc.) read from working_classified_path,
+        so we repopulate it from the run's own prepare artifact.
+        """
+        artifact = self._prepare_artifact_path()
+        if artifact is None or not artifact.exists():
+            return
+        destination = self.working_classified_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(artifact, destination)
+
+    def _load_prepare_result(self) -> PrepareResult:
+        """Reconstruct a PrepareResult from the prepared classified file without re-running prepare.
+
+        Used in retry mode when 'prepare' is not in steps_to_run. Prefers this run's own
+        preserved prepare artifact (survives staging cleanup); falls back to the published
+        output. Only when neither exists do we treat the run as having zero analyzable rows.
         """
         tag_root = self.runtime_root / self.tag
-        classified = tag_root / "classified" / "classified_posts.csv"
+        published = tag_root / "classified" / "classified_posts.csv"
+        classified = self._prepare_artifact_path() or published
         if not classified.exists():
-            # No prior classified file — treat as zero analyzable rows
+            # Neither a prepare artifact nor a published file — nothing to analyze.
             return PrepareResult(
                 output_path=classified,
                 analyzable_rows=0,
@@ -578,7 +618,14 @@ class AnalysisCoordinator:
             return
 
         if self._should_run("briefing"):
-            self._execute_step("briefing")
+            # Briefing is LLM-only (no deterministic fallback). Block cleanly without a
+            # key instead of letting the child fail with an error.
+            if not has_key:
+                self._record_decision(
+                    "briefing", "blocked", f"No effective API key ({self.config.api_key_env})."
+                )
+            else:
+                self._execute_step("briefing")
 
         # trends step
         if self._should_run("trends"):

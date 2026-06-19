@@ -413,9 +413,11 @@ def test_settings_save_announces_confirmation(live_server, browser_page) -> None
     _load_browser_with_data(page, live_server)
     page.click('.tab[data-view="settings"]')
 
-    page.click("#saveSettingsBtn")
+    page.click("#saveConfigBtn")
 
-    assert "Settings saved" in page.inner_text("#statusBar")
+    # New settings flow confirms inline next to the save button (not the global status bar).
+    page.wait_for_selector("#configSaveStatus")
+    assert "Saved" in page.inner_text("#configSaveStatus")
 
 
 def test_active_loading_copy_uses_typographic_ellipsis() -> None:
@@ -573,8 +575,9 @@ def test_reduced_motion_disables_view_chart_and_hover_motion(live_server, browse
     page.emulate_media(reduced_motion="reduce")
     _load_browser_with_data(page, live_server)
 
-    page.hover("#refreshBtn")
-    assert page.eval_on_selector("#refreshBtn", "el => getComputedStyle(el).transform") == "none"
+    # The topband refresh button was removed; the primary tab is a stable hover target.
+    page.hover('.tab[data-view="dashboard"]')
+    assert page.eval_on_selector('.tab[data-view="dashboard"]', "el => getComputedStyle(el).transform") == "none"
 
     page.click('.tab[data-view="explorer"]')
     page.wait_for_selector('[data-chart="sentiment"] canvas', timeout=30000)

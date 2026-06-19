@@ -47,7 +47,7 @@ def run_briefing_job(
             output_path,
             provider=provider,
             use_llm=use_llm,
-            fallback_on_error=True,
+            fallback_on_error=False,
         )
         fields = {
             "state": "completed",

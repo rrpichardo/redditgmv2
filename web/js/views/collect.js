@@ -177,7 +177,7 @@ export async function upload() {
       body: form,
     });
     setNotice(`Loaded ${fmt.format(result.rows)} rows as ${result.kind}.`, "success");
-    await loadRun();
+    await loadRun({ silent: true });
   } catch (error) {
     setNotice(error.message, "error");
   } finally {

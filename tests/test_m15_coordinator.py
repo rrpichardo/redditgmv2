@@ -340,11 +340,12 @@ def test_one_row_and_missing_key_apply_per_step_guards(tmp_path: Path, monkeypat
     result = coordinator.run()
 
     assert result["state"] == "completed_with_warnings"
-    assert called == ["briefing"]
+    # Briefing is LLM-only now — with no key it is blocked, not run via the worker.
+    assert called == []
     with RunStore(runtime_root / "runs.db") as store:
         assert store.get_step("guarded", "classify")["state"] == "blocked"
         assert store.get_step("guarded", "classify")["total"] == 1
-        assert store.get_step("guarded", "briefing")["state"] == "completed"
+        assert store.get_step("guarded", "briefing")["state"] == "blocked"
         assert store.get_step("guarded", "trends")["state"] == "blocked"
         assert store.get_step("guarded", "trend_pdf")["state"] == "skipped"
         assert store.get_step("guarded", "qa_index")["state"] == "blocked"

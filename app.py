@@ -18,12 +18,13 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from scripts.analyze_run import STEP_ORDER, retry_steps
+from src.app_config import load_api_key, load_config, save_api_key, save_config
 from src.briefing import write_briefing
 from src.charts import build_chart_payload, build_detail_data
 # Bare import so test mocks (patch "app.start_job", "app.find_active_job") resolve correctly
@@ -477,12 +478,16 @@ def provider_config(provider_name: str, model: str = "", api_key: str = "") -> P
     if key not in PROVIDERS:
         raise HTTPException(status_code=400, detail=f"Unknown provider: {provider_name}")
     info = PROVIDERS[key]
+    # Fall back to the key saved in Settings (runtime/secrets.json) when the request
+    # carries none — the GET /api/config endpoint never returns the raw key, so the
+    # browser can't resend it. Server-side resolution keeps the key off the wire.
+    resolved_key = api_key.strip() or load_api_key()
     return ProviderConfig(
         provider=key,
         model=model.strip() or info["model"],
         base_url=info["base_url"],
         api_key_env=info["api_key_env"],
-        api_key=api_key.strip(),
+        api_key=resolved_key,
     )
 
 
@@ -687,6 +692,26 @@ def request_filters(
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
     return HTMLResponse((WEB / "index.html").read_text(encoding="utf-8"))
+
+
+@app.get("/api/config")
+def get_config_endpoint() -> JSONResponse:
+    cfg = load_config()
+    # Never expose the key in GET — just signal whether one is stored
+    api_key = load_api_key()
+    cfg["_api_key_set"] = bool(api_key)
+    return JSONResponse(cfg)
+
+
+@app.patch("/api/config")
+async def patch_config_endpoint(request: Request) -> JSONResponse:
+    body = await request.json()
+    api_key = body.pop("api_key", None)
+    if api_key is not None:
+        save_api_key(api_key)
+    if body:
+        save_config(body)
+    return JSONResponse({"ok": True})
 
 
 @app.get("/api/run")
@@ -932,8 +957,8 @@ def classify_job(request: ClassifyJobRequest) -> JSONResponse:
     pcfg = provider_config(request.provider, request.model, request.api_key)
     # API key goes in env, never on the command line
     env: dict[str, str] = {}
-    if request.api_key:
-        env[pcfg.api_key_env] = request.api_key
+    if pcfg.api_key:
+        env[pcfg.api_key_env] = pcfg.api_key
     extra_args = [
         "--classified_path", str(cpath),
         "--provider", pcfg.provider,
@@ -1132,8 +1157,8 @@ def trends_run(request: TrendJobRequest) -> JSONResponse:
         )
     pcfg = provider_config(request.provider, request.model, request.api_key)
     env: dict[str, str] = {}
-    if request.api_key:
-        env[pcfg.api_key_env] = request.api_key
+    if pcfg.api_key:
+        env[pcfg.api_key_env] = pcfg.api_key
     extra_args = [
         "--classified_path", str(cpath),
         "--n_clusters", str(max(2, request.n_clusters)),
@@ -1287,8 +1312,8 @@ def trends_briefing(request: TrendBriefingRequest) -> JSONResponse:
         )
     pcfg = provider_config(request.provider, request.model, request.api_key)
     env: dict[str, str] = {}
-    if request.api_key:
-        env[pcfg.api_key_env] = request.api_key
+    if pcfg.api_key:
+        env[pcfg.api_key_env] = pcfg.api_key
     extra_args = [
         "--provider", pcfg.provider,
         "--model", pcfg.model,
@@ -1363,8 +1388,8 @@ def qa_build_index(request: QaBuildIndexRequest) -> JSONResponse:
         )
     pcfg = provider_config(request.provider, request.model, request.api_key)
     env: dict[str, str] = {}
-    if request.api_key:
-        env[pcfg.api_key_env] = request.api_key
+    if pcfg.api_key:
+        env[pcfg.api_key_env] = pcfg.api_key
     extra_args = [
         "--classified_path", str(cpath),
         "--embedding_model", request.embedding_model,
@@ -1417,8 +1442,8 @@ def qa_search(request: QaSearchRequest) -> JSONResponse:
     except FileNotFoundError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     pcfg = provider_config(request.provider, request.model, request.api_key)
-    if request.api_key:
-        os.environ[pcfg.api_key_env] = request.api_key
+    if pcfg.api_key:
+        os.environ[pcfg.api_key_env] = pcfg.api_key
     try:
         hits = retrieve(
             request.query, docs, index, pcfg,
@@ -1442,8 +1467,8 @@ def qa_answer(request: QaAnswerRequest) -> JSONResponse:
     except FileNotFoundError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     pcfg = provider_config(request.provider, request.model, request.api_key)
-    if request.api_key:
-        os.environ[pcfg.api_key_env] = request.api_key
+    if pcfg.api_key:
+        os.environ[pcfg.api_key_env] = pcfg.api_key
     try:
         hits = retrieve(
             request.question, docs, index, pcfg,
@@ -1473,8 +1498,8 @@ def analyze(request: AnalyzeRequest) -> JSONResponse:
 
     # API key goes into the subprocess env, never on the CLI
     env: dict[str, str] = {}
-    if request.api_key:
-        env[pcfg.api_key_env] = request.api_key
+    if pcfg.api_key:
+        env[pcfg.api_key_env] = pcfg.api_key
 
     extra_args = [
         "--tag", tag,
@@ -1661,8 +1686,8 @@ def pipeline_retry(request: PipelineRetryRequest) -> JSONResponse:
         request.api_key,
     )
     env: dict[str, str] = {}
-    if request.api_key:
-        env[pcfg.api_key_env] = request.api_key
+    if pcfg.api_key:
+        env[pcfg.api_key_env] = pcfg.api_key
 
     extra_args = [
         "--tag", tag,

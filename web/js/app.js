@@ -7,14 +7,16 @@ import { render, setView, handleSaveKindClick, handleTabKeydown } from "./nav.js
 import { bindResize, renderChartInto } from "./charts.js";
 import { buildFilterParams, hasActiveFilters } from "./views/explore.js";
 import { collectProgressText, updateCollectUi, startCollectPolling } from "./views/collect.js";
+import { loadConfig } from "./views/settings.js";
 
 // ---------------------------------------------------------------------------
 // Run load + summary refresh
 // ---------------------------------------------------------------------------
 
-export async function loadRun() {
-  // tag is now sourced from state (set in Settings tab) instead of a DOM input.
-  setNotice("Loading run…");
+// silent: true suppresses the "Loading run…" start notice and the clear at end —
+// use when the caller already set a notice it wants to keep (e.g. upload success).
+export async function loadRun({ silent = false } = {}) {
+  if (!silent) setNotice("Loading run…");
   try {
     const params = buildFilterParams();
     const [runResult, trendsResult, timeseriesResult] = await Promise.allSettled([
@@ -51,7 +53,7 @@ export async function loadRun() {
     if (collectStatus?.status === "running") {
       updateCollectUi(collectStatus);
       startCollectPolling(collectStatus.job_id);
-    } else {
+    } else if (!silent) {
       setNotice("");
     }
   } catch (error) {
@@ -97,10 +99,7 @@ function updateDownloads() {
   const report = $("#reportDownload");
   const sourceZip = $("#sourceZipDownload");
   const combined = $("#combinedDownload");
-  const saveZip = $("#saveZipBtn");
   const hasSource = Boolean(state.data?.status.has_source);
-
-  if (saveZip) saveZip.disabled = !hasSource;
   if (sourceZip) {
     sourceZip.href = `/api/download/source?tag=${encodeURIComponent(state.tag)}&kind=all`;
     sourceZip.setAttribute("aria-disabled", hasSource ? "false" : "true");
@@ -162,7 +161,7 @@ export async function saveExport(kind = "all") {
     report: "briefing",
   };
   const buttons = kind === "all"
-    ? [$("#saveZipBtn"), $("#saveZipPanelBtn")].filter(Boolean)
+    ? [$("#saveZipPanelBtn")].filter(Boolean)
     : [];
   buttons.forEach((button) => setBusy(button, true, "Save ZIP"));
   setNotice(`Saving ${labels[kind] || "export"}…`);
@@ -175,7 +174,7 @@ export async function saveExport(kind = "all") {
     setNotice(error.message, "error");
   } finally {
     buttons.forEach((button) =>
-      setBusy(button, false, button.id === "saveZipBtn" ? "Save ZIP" : "Save ZIP to Downloads")
+      setBusy(button, false, "Save ZIP to Downloads")
     );
   }
 }
@@ -255,12 +254,6 @@ export async function refreshExportJobStatus() {
 // ---------------------------------------------------------------------------
 
 function bindGlobalEvents() {
-  // Refresh button in the topband.
-  $("#refreshBtn").addEventListener("click", loadRun);
-  // Save ZIP chip in topband-primary (the export chips row is removed).
-  $$(".top-actions [data-save-kind]").forEach((target) =>
-    target.addEventListener("click", handleSaveKindClick)
-  );
   // Tab navigation — rail inputs removed; provider/model/api_key now live in Settings tab.
   $$(".tab").forEach((tab) => {
     tab.addEventListener("click", () => setView(tab.dataset.view));
@@ -270,4 +263,5 @@ function bindGlobalEvents() {
 
 bindGlobalEvents();
 bindResize();
-loadRun();
+// Load server config first so state has api key / defaults, then fetch run data
+loadConfig().then(() => loadRun());

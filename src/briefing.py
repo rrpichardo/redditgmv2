@@ -10,7 +10,6 @@ import pandas as pd
 
 from src.gm_insights import (
     ProviderConfig,
-    fallback_synthesis,
     generate_synthesis_with_llm,
     summary_payload,
 )
@@ -31,21 +30,12 @@ def generate_briefing(
     fallback_on_error: bool = False,
 ) -> BriefingResult:
     """Generate one briefing, optionally degrading an LLM error to deterministic output."""
-    payload = summary_payload(df)
-    if not use_llm:
-        return BriefingResult(fallback_synthesis(payload), used_llm=False)
-    if provider is None:
-        raise ValueError("provider is required when use_llm=True")
-    try:
-        return BriefingResult(
-            generate_synthesis_with_llm(payload, provider),
-            used_llm=True,
+    if not use_llm or provider is None:
+        raise RuntimeError(
+            "Briefing requires an LLM provider. Add your API key in Settings and re-run."
         )
-    except Exception as exc:
-        if not fallback_on_error:
-            raise
-        warning = f"LLM synthesis failed; deterministic fallback used: {exc}"
-        return BriefingResult(fallback_synthesis(payload), used_llm=False, warning=warning[:500])
+    payload = summary_payload(df)
+    return BriefingResult(generate_synthesis_with_llm(payload, provider), used_llm=True)
 
 
 def write_briefing(
