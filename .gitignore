@@ -9,3 +9,4 @@ runtime/
 exports/
 *.log
 
+.superpowers/
