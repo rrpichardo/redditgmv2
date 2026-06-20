@@ -54,6 +54,10 @@ function hasRising(clusters) {
   return clusters.some((c) => c.trend_signal?.velocity?.direction === "rising");
 }
 
+function trendEmptyState(detail) {
+  return `<div class="notice">${esc(detail || "This chart needs more dated records.")}</div>`;
+}
+
 // ── Signals section ──────────────────────────────────────────────────────────
 
 // Render the hero card for the top-ranked cluster.
@@ -137,40 +141,52 @@ export function mountDashboardCharts() {
   const clusters = td?.ok && td.clusters?.length ? td.clusters : null;
 
   if (clusters) {
+    const validQuadrantClusters = clusters.filter(
+      (c) => c.trend_signal?.velocity?.valid && c.trend_signal?.zscore?.valid,
+    );
+    const validLeaderboardClusters = clusters.filter((c) => c.trend_signal?.velocity?.valid);
     // Mount the velocity × z-score quadrant scatter chart.
     const quadEl = document.getElementById("quadrantChart");
     if (quadEl) {
-      renderIntoEl(quadEl, buildQuadrantOption(clusters));
+      if (validQuadrantClusters.length) {
+        renderIntoEl(quadEl, buildQuadrantOption(validQuadrantClusters));
+      } else {
+        quadEl.innerHTML = trendEmptyState(
+          "Velocity needs at least 2 recent and 3 baseline records; Z-score needs at least 4 periods.",
+        );
+      }
       renderAccessibleTable(
         document.querySelector('[data-chart-table="quadrantChart"]'),
         "Velocity and Z-score data",
         ["signal", "velocity", "z_score", "confidence"],
-        clusters
-          .filter((c) => c.trend_signal?.velocity?.valid && c.trend_signal?.zscore?.valid)
-          .map((c) => ({
+        validQuadrantClusters.map((c) => ({
             signal: c.label?.short_label || `Cluster ${c.cluster_id}`,
             velocity: c.trend_signal.velocity.velocity,
             z_score: c.trend_signal.zscore.zscore,
             confidence: c.trend_signal.confidence_banner,
-          })),
+        })),
       );
     }
 
     // Mount the trend leaderboard bar chart.
     const lbEl = document.getElementById("leaderboardChart");
     if (lbEl) {
-      renderIntoEl(lbEl, buildLeaderboardOption(clusters));
+      if (validLeaderboardClusters.length) {
+        renderIntoEl(lbEl, buildLeaderboardOption(validLeaderboardClusters));
+      } else {
+        lbEl.innerHTML = trendEmptyState(
+          "Velocity needs at least 2 recent and 3 baseline records before signals can be ranked.",
+        );
+      }
       renderAccessibleTable(
         document.querySelector('[data-chart-table="leaderboardChart"]'),
         "Trend leaderboard data",
         ["signal", "velocity", "confidence"],
-        clusters
-          .filter((c) => c.trend_signal?.velocity?.valid)
-          .map((c) => ({
+        validLeaderboardClusters.map((c) => ({
             signal: c.label?.short_label || `Cluster ${c.cluster_id}`,
             velocity: c.trend_signal.velocity.velocity,
             confidence: c.trend_signal.confidence_banner,
-          })),
+        })),
       );
     }
 
@@ -189,15 +205,19 @@ export function mountDashboardCharts() {
   }
 
   if (tsd?.ok) {
-    // Mount weekly negative-mention line chart.
+    // Mount the collection-volume-resistant negative-share line chart.
     const negEl = document.getElementById("negTimeChart");
     if (negEl) {
-      renderIntoEl(negEl, buildLineTimeseriesOption(tsd, "negative"));
+      renderIntoEl(negEl, buildLineTimeseriesOption(tsd, "negative_share_pct"));
       renderAccessibleTable(
         document.querySelector('[data-chart-table="negTimeChart"]'),
-        "Negative mentions by week",
-        ["week", "negative"],
-        (tsd.buckets || []).map((week, index) => ({ week, negative: tsd.negative?.[index] })),
+        `Negative share by ${tsd.granularity || "time bucket"}`,
+        ["bucket", "negative_share_pct", "total"],
+        (tsd.buckets || []).map((bucket, index) => ({
+          bucket,
+          negative_share_pct: tsd.negative_share_pct?.[index],
+          total: tsd.total?.[index],
+        })),
       );
     }
 
@@ -207,21 +227,22 @@ export function mountDashboardCharts() {
       renderIntoEl(sentEl, buildStackedAreaOption(tsd));
       renderAccessibleTable(
         document.querySelector('[data-chart-table="sentTimeChart"]'),
-        "Sentiment by week",
-        ["week", "positive", "neutral", "negative"],
-        (tsd.buckets || []).map((week, index) => ({
-          week,
+        `Sentiment counts by ${tsd.granularity || "time bucket"}`,
+        ["bucket", "positive", "neutral", "negative", "total"],
+        (tsd.buckets || []).map((bucket, index) => ({
+          bucket,
           positive: tsd.positive?.[index],
           neutral: tsd.neutral?.[index],
           negative: tsd.negative?.[index],
+          total: tsd.total?.[index],
         })),
       );
     }
   } else {
-    // Show a graceful fallback if timeseries data isn't loaded yet.
+    const detail = tsd?.detail || "Run analysis on records from at least two UTC dates to render this chart.";
     ["negTimeChart", "sentTimeChart"].forEach((id) => {
       const el = document.getElementById(id);
-      if (el) el.innerHTML = `<div class="notice">Date data required to render this chart.</div>`;
+      if (el) el.innerHTML = trendEmptyState(detail);
     });
   }
 }
@@ -234,6 +255,8 @@ export function dashboard() {
   if (!data?.summary?.metrics?.total_rows) return emptyState();
 
   const td = state.trendsData;
+  const tsd = state.timeseriesData;
+  const granularityLabel = tsd?.granularity_label || "time-bucketed";
   // Only show signals section when trends have been fetched and returned clusters.
   const clusters = td?.ok && td.clusters?.length ? td.clusters : null;
 
@@ -271,12 +294,12 @@ export function dashboard() {
     </div>
     <div class="panel-grid two" style="margin-top:0.75rem">
       <section class="panel chart-panel">
-        <div class="panel-head"><h3>Negative mentions over time</h3><small>weekly</small></div>
+        <div class="panel-head"><h3>Negative share over time</h3><small>${esc(granularityLabel)} · rate</small></div>
         <div id="negTimeChart" role="img" aria-label="Negative mentions over time chart" style="height:220px"></div>
         ${chartDataDetails("negTimeChart", "Negative mentions over time")}
       </section>
       <section class="panel chart-panel">
-        <div class="panel-head"><h3>Sentiment over time</h3><small>weekly stacked</small></div>
+        <div class="panel-head"><h3>Sentiment volume over time</h3><small>${esc(granularityLabel)} counts · affected by collection volume</small></div>
         <div id="sentTimeChart" role="img" aria-label="Sentiment over time chart" style="height:220px"></div>
         ${chartDataDetails("sentTimeChart", "Sentiment over time")}
       </section>

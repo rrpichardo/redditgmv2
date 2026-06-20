@@ -30,6 +30,7 @@ from src.charts import build_chart_payload, build_detail_data
 # Bare import so test mocks (patch "app.start_job", "app.find_active_job") resolve correctly
 from src.jobs import find_active_job, job_path, read_status, start_job
 from src.run_store import RunStore, latest_output_root
+from src.timeseries import build_timeseries
 from src.gm_insights import (
     MIN_CELL,
     ProviderConfig,
@@ -1256,52 +1257,22 @@ def trends_results(tag: str = DEFAULT_TAG) -> JSONResponse:
 
 @app.get("/api/trends/timeseries")
 def trends_timeseries(tag: str = DEFAULT_TAG) -> JSONResponse:
-    """Return weekly bucketed sentiment counts from the classified dataset."""
+    """Return an adaptive UTC time series with explicit availability reasons."""
     tag = clean_tag(tag)
     cpath = classified_path(tag)
-    # Return ok=False (not 404) when data doesn't exist yet — caller handles gracefully
     if not cpath.exists():
-        return safe_json({"ok": False, "detail": "No classified data found."})
+        return safe_json({
+            "ok": False,
+            "reason_code": "no_classified_data",
+            "detail": "No classified data found for this analysis.",
+            "valid_timestamp_count": 0,
+            "invalid_timestamp_count": 0,
+        })
     try:
         raw = load_classified(cpath)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Could not read classified data: {exc}") from exc
-    df = analyzed_frame(raw)
-    df = df.copy()
-    # Parse timestamps; drop rows where parsing fails
-    df["_ts"] = pd.to_datetime(df["created_at_norm"], errors="coerce")
-    df = df.dropna(subset=["_ts"])
-    if df.empty:
-        return safe_json({"ok": False, "detail": "No rows with valid timestamps."})
-    # ISO week label e.g. "2024-W03" — sortable and standard
-    df["_week"] = df["_ts"].dt.strftime("%G-W%V")
-    weeks = sorted(df["_week"].unique().tolist())
-    if len(weeks) < 2:
-        return safe_json({"ok": False, "detail": "Fewer than 2 weeks of data."})
-    # Pivot: rows=week, columns=sentiment value → integer counts
-    sent_counts = df.groupby(["_week", "sentiment"]).size().unstack(fill_value=0)
-
-    def _week_series(col: str) -> list[int]:
-        # Return a per-week list of counts for the given sentiment; 0 if column absent
-        if col not in sent_counts.columns:
-            return [0] * len(weeks)
-        return [int(sent_counts[col].get(w, 0)) for w in weeks]
-
-    # Optional per-cluster weekly counts — only populated if cluster_id column exists
-    by_cluster: dict[str, list[int]] = {}
-    if "cluster_id" in df.columns:
-        cluster_counts = df.groupby(["_week", "cluster_id"]).size().unstack(fill_value=0)
-        for cid in cluster_counts.columns:
-            by_cluster[str(int(cid))] = [int(cluster_counts[cid].get(w, 0)) for w in weeks]
-
-    return safe_json({
-        "ok": True,
-        "buckets": weeks,           # ISO week labels, sorted ascending
-        "negative": _week_series("negative"),
-        "positive": _week_series("positive"),
-        "neutral": _week_series("neutral"),
-        "by_cluster": by_cluster,   # keyed by str(cluster_id), each a list parallel to buckets
-    })
+    return safe_json(build_timeseries(analyzed_frame(raw)))
 
 
 @app.post("/api/trends/briefing")

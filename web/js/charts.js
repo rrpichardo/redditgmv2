@@ -339,11 +339,13 @@ function optLeaderboard(clusters) {
 // tsd must have a `buckets` array of x-axis labels and a `[seriesKey]` array of values.
 function optLineTimeseries(tsd, seriesKey) {
   const src = tsd || {};  // guard against null on first load
+  const isPercent = seriesKey === "negative_share_pct";
   return {
     grid: { left: 8, right: 24, top: 16, bottom: 8, containLabel: true },
     xAxis: { type: "category", data: src.buckets || [], axisLabel: { rotate: 30, fontSize: 10 } },
-    yAxis: { type: "value" },
-    tooltip: { trigger: "axis" },
+    yAxis: { type: "value", min: isPercent ? 0 : null, max: isPercent ? 100 : null,
+      axisLabel: isPercent ? { formatter: "{value}%" } : {} },
+    tooltip: { trigger: "axis", valueFormatter: isPercent ? (value) => `${value}%` : undefined },
     series: [{ type: "line", data: src[seriesKey] || [], smooth: true, areaStyle: { opacity: 0.12 } }],
   };
 }
