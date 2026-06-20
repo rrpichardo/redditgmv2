@@ -741,6 +741,54 @@ def get_run(
     return safe_json(run_snapshot(tag, filters))
 
 
+@app.get("/api/evidence")
+def get_evidence(
+    tag: str = DEFAULT_TAG,
+    sentiment: list[str] | None = Query(default=None),
+    vehicle: list[str] | None = Query(default=None),
+    subreddit: list[str] | None = Query(default=None),
+    severity: list[str] | None = Query(default=None),
+    comment_type: list[str] | None = Query(default=None),
+    competitor: list[str] | None = Query(default=None),
+    search: str = "",
+    min_score: float | None = None,
+    date_start: str | None = None,
+    date_end: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=1, le=100),
+) -> JSONResponse:
+    """Return stable, server-filtered evidence pages for Explorer."""
+    frame = load_frame(clean_tag(tag))
+    filters = request_filters(
+        sentiment,
+        vehicle,
+        subreddit,
+        severity,
+        comment_type,
+        competitor,
+        search,
+        min_score,
+        date_start,
+        date_end,
+    )
+    selected = filter_analyzed(frame, filters) if not frame.empty else pd.DataFrame()
+    rows = evidence_table(selected, limit=None) if not selected.empty else pd.DataFrame()
+    total_items = len(rows)
+    total_pages = math.ceil(total_items / page_size) if total_items else 0
+    start = (page - 1) * page_size
+    items = dataframe_records(rows.iloc[start:start + page_size]) if total_items else []
+    for item in items:
+        item["score_unit"] = "reddit_score"
+    return safe_json({
+        "items": items,
+        "page": page,
+        "page_size": page_size,
+        "total_items": total_items,
+        "total_pages": total_pages,
+        "score_unit": "reddit_score",
+    })
+
+
 @app.get("/api/charts/detail")
 def charts_detail(
     tag: str = DEFAULT_TAG,

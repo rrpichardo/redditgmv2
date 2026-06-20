@@ -287,12 +287,16 @@ def normalize_reddit_frame(raw: pd.DataFrame) -> pd.DataFrame:
         if kind in {"combined", "classified"} or "post_title" in raw.columns:
             comment_id = _first_present(row, ["comment_id"])
             post_id = _first_present(row, ["post_id", "id", "post_id_norm"])
-            source_type = "comment" if comment_id else "post"
+            existing_source_type = _first_present(row, ["source_type"])
+            source_type = existing_source_type or ("comment" if comment_id else "post")
             source_id = _first_present(row, ["source_id"]) or comment_id or post_id or f"row_{idx}"
             subreddit = _first_present(row, ["post_subreddit", "subreddit", "subreddit_norm"])
             title = _first_present(row, ["post_title", "title", "title_norm"])
-            post_body = _first_present(row, ["post_selftext", "post_content", "selftext", "content"])
-            target_text = _first_present(row, ["target_text", "comment_body", "body"])
+            post_body = _first_present(
+                row, ["post_body_norm", "post_selftext", "post_content", "selftext", "content"]
+            )
+            comment_body = _first_present(row, ["comment_body_norm", "comment_body", "body"])
+            target_text = _first_present(row, ["target_text"]) or comment_body
             if not target_text:
                 target_text = post_body or title
             score = _first_present(row, ["score_norm", "comment_score", "score", "post_score"])
@@ -305,21 +309,36 @@ def normalize_reddit_frame(raw: pd.DataFrame) -> pd.DataFrame:
             subreddit = _first_present(row, ["subreddit"])
             title = _first_present(row, ["title"])
             post_body = _first_present(row, ["selftext", "content"])
+            comment_body = ""
             target_text = post_body or title
             score = _first_present(row, ["score"])
             created_at = _first_present(row, ["created_at", "downloaded_at"])
             permalink = _first_present(row, ["permalink"])
         else:
-            source_type = "row"
+            source_type = _first_present(row, ["source_type"]) or "row"
             source_id = _first_present(row, ["source_id", "id", "comment_id", "post_id"]) or f"row_{idx}"
-            subreddit = _first_present(row, ["subreddit", "post_subreddit"])
-            title = _first_present(row, ["title", "post_title"])
-            post_body = _first_present(row, ["selftext", "content", "post_selftext", "post_content"])
-            target_text = _first_present(row, ["comment_body", "body", "text", "description"]) or post_body or title
-            score = _first_present(row, ["comment_score", "score", "post_score"])
-            created_at = _first_present(row, ["created_at", "post_created_at", "downloaded_at"])
-            permalink = _first_present(row, ["permalink", "comment_permalink", "post_permalink"])
-            post_id = _first_present(row, ["post_id", "id"])
+            subreddit = _first_present(row, ["subreddit_norm", "subreddit", "post_subreddit"])
+            title = _first_present(row, ["title_norm", "title", "post_title"])
+            post_body = _first_present(
+                row, ["post_body_norm", "selftext", "content", "post_selftext", "post_content"]
+            )
+            comment_body = _first_present(
+                row, ["comment_body_norm", "comment_body", "body", "text"]
+            )
+            target_text = _first_present(row, ["target_text"]) or comment_body or post_body or title
+            score = _first_present(row, ["score_norm", "comment_score", "score", "post_score"])
+            created_at = _first_present(
+                row, ["created_at_norm", "created_at", "post_created_at", "downloaded_at"]
+            )
+            permalink = _first_present(
+                row, ["permalink_norm", "permalink", "comment_permalink", "post_permalink"]
+            )
+            post_id = _first_present(row, ["post_id_norm", "post_id", "id"])
+
+        if source_type == "comment" and not comment_body:
+            comment_body = target_text
+        if source_type == "post" and not post_body:
+            post_body = target_text
 
         combined_text = (
             "=== ORIGINAL POST (CONTEXT ONLY) ===\n"
@@ -338,6 +357,8 @@ def normalize_reddit_frame(raw: pd.DataFrame) -> pd.DataFrame:
                 "post_id_norm": post_id,
                 "subreddit_norm": subreddit,
                 "title_norm": title,
+                "post_body_norm": post_body,
+                "comment_body_norm": comment_body,
                 "target_text": target_text,
                 "combined_text": combined_text,
                 "score_norm": pd.to_numeric(score, errors="coerce"),
@@ -669,18 +690,29 @@ def filter_analyzed(df: pd.DataFrame, filters: dict[str, Any]) -> pd.DataFrame:
     if filters.get("date_range") and len(filters["date_range"]) == 2:
         start, end = filters["date_range"]
         if "created_at_norm" in out.columns and (start or end):
-            # Compute dates once against the current (possibly already filtered) index
-            # to avoid boolean-Series reindexing warnings from index mismatch.
-            dates = pd.to_datetime(out["created_at_norm"], errors="coerce").dt.date
+            dates = pd.to_datetime(out["created_at_norm"], errors="coerce", utc=True).dt.tz_localize(None).dt.normalize()
+            start_value = pd.Timestamp(start) if start else None
+            end_value = pd.Timestamp(end) if end else None
             if start and end:
-                out = out[(dates >= start) & (dates <= end)]
+                out = out[(dates >= start_value) & (dates <= end_value)]
             elif start:
-                out = out[dates >= start]
+                out = out[dates >= start_value]
             else:
-                out = out[dates <= end]
+                out = out[dates <= end_value]
     search = (filters.get("search") or "").strip().lower()
     if search:
-        haystack = (out["title_norm"].fillna("") + " " + out["target_text"].fillna("") + " " + out["description"].fillna("")).str.lower()
+        def _column(name: str) -> pd.Series:
+            if name in out:
+                return out[name].fillna("").astype(str)
+            return pd.Series("", index=out.index, dtype=str)
+
+        haystack = (
+            _column("title_norm")
+            + " " + _column("post_body_norm")
+            + " " + _column("comment_body_norm")
+            + " " + _column("target_text")
+            + " " + _column("description")
+        ).str.lower()
         out = out[haystack.str.contains(re.escape(search), na=False)]
     min_score = filters.get("min_score")
     if min_score is not None:
@@ -989,9 +1021,12 @@ def competitor_breakdown_detail(df: pd.DataFrame) -> pd.DataFrame:
     return grouped.sort_values("count", ascending=False).reset_index()
 
 
-def evidence_table(df: pd.DataFrame, limit: int = 500) -> pd.DataFrame:
+def evidence_table(df: pd.DataFrame, limit: int | None = 500) -> pd.DataFrame:
     analyzed = analyzed_frame(df)
     columns = [
+        "source_id",
+        "source_type",
+        "post_id_norm",
         "created_at_norm",
         "subreddit_norm",
         "vehicle_mentioned",
@@ -1002,12 +1037,23 @@ def evidence_table(df: pd.DataFrame, limit: int = 500) -> pd.DataFrame:
         "score_norm",
         "description",
         "title_norm",
-        "target_text",  # raw post/comment body for inline reading
+        "post_body_norm",
+        "comment_body_norm",
+        "target_text",
         "permalink_norm",
     ]
     existing = [col for col in columns if col in analyzed.columns]
-    # Sort by classification confidence so highest-signal rows appear first.
-    out = analyzed.loc[:, existing].sort_values("score_norm", ascending=False, na_position="last").head(limit)
+    sort_columns = [column for column in ("score_norm", "source_id") if column in analyzed]
+    ascending = [False if column == "score_norm" else True for column in sort_columns]
+    out = analyzed.loc[:, existing].sort_values(
+        sort_columns,
+        ascending=ascending,
+        na_position="last",
+        kind="mergesort",
+    )
+    if limit is not None:
+        out = out.head(limit)
+    out = out.copy()
     if "created_at_norm" in out:
         out["created_at_norm"] = pd.to_datetime(out["created_at_norm"], errors="coerce").dt.strftime("%Y-%m-%d")
     return out
