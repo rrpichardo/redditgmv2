@@ -268,3 +268,39 @@ def test_cluster_prompt_preview_and_reset_are_interactive(live_server, browser_p
     page.click("#resetClusterPromptBtn")
     page.wait_for_function(f"() => document.querySelector('#cfg-prompt-cluster')?.value === {json.dumps(default_prompt)}")
     assert page.inner_text("#clusterPromptValidation") == "Prompt is valid."
+
+
+def test_qa_recovery_is_on_dashboard_and_polling_stops_on_navigation(live_server, browser_page) -> None:
+    page = browser_page
+
+    page.route(
+        "**/api/qa/status*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "state": "stale",
+                "detail": "The Q&A index belongs to older classified data.",
+                "recovery_action": "rebuild",
+                "doc_count": 12,
+            }),
+        ),
+    )
+    page.route(
+        "**/api/qa/build-index",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"state": "running", "job_id": "qa-job", "started": True}),
+        ),
+    )
+    _load_browser_with_data(page, live_server)
+
+    assert page.get_by_role("heading", name="Ask your evidence").count() == 1
+    assert page.get_by_role("button", name="Rebuild for current data").count() == 1
+    assert page.locator('.tab[data-view="explorer"]').get_attribute("aria-selected") == "false"
+
+    page.click("#qaBuildIndexBtn")
+    assert page.evaluate("async () => (await import('/static/js/state.js')).state.qaPollTimer !== null") is True
+    page.click('.tab[data-view="explorer"]')
+    assert page.evaluate("async () => (await import('/static/js/state.js')).state.qaPollTimer === null") is True

@@ -7,6 +7,7 @@ import {
   buildQuadrantOption, buildLeaderboardOption,
   buildLineTimeseriesOption, buildStackedAreaOption,
 } from "../charts.js";
+import { qaView } from "./qa.js";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -295,6 +296,7 @@ export function dashboard() {
         <p>These signals are found by clustering your records. They are emerging themes—not fixed categories or subreddit lists.</p>
       </div>
       ${signalsSection}
+      ${qaView()}
       <div class="panel-grid two" style="margin-top:0.75rem">
         <section class="panel chart-panel">
           <div class="panel-head"><h3>Velocity × Z-score quadrant</h3><small>color = confidence</small></div>

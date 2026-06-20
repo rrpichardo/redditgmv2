@@ -10,13 +10,13 @@ import { render } from "../nav.js";
 // ---------------------------------------------------------------------------
 
 function qaJobBar(status) {
-  if (!status || status.state === "idle") return "";
-  const stateLabel = { running: "Building index…", completed: "Index ready", failed: "Build failed", interrupted: "Build interrupted" }[status.state] || status.state;
-  const color = status.state === "completed" ? "success" : status.state === "running" ? "" : "error";
+  if (!status || ["ready", "missing", "blocked_no_api_key"].includes(status.state)) return "";
+  const stateLabel = { building: "Building index…", stale: "Index is stale", failed: "Build failed" }[status.state] || status.state;
+  const color = status.state === "building" ? "" : "error";
   const pct = status.total > 0 ? Math.round((status.processed / status.total) * 100) : 0;
   return `<div class="notice ${color}" style="margin-bottom:0.5rem">
     <strong>Index build:</strong> ${stateLabel}
-    ${status.state === "running" && status.total > 0
+    ${status.state === "building" && status.total > 0
       ? ` — ${status.processed}/${status.total} docs (${pct}%)`
       : ""}
     ${status.error ? ` — ${esc(status.error)}` : ""}
@@ -50,33 +50,35 @@ export function qaView() {
   const hits = state.qaHits;
   const answer = state.qaAnswer;
   const hasClassified = !!(state.data && state.data.summary && state.data.summary.metrics?.analyzed_rows > 0);
-  const indexReady = qjs?.state === "completed";
-  const jobRunning = qjs?.state === "running";
+  const qaState = qjs?.state || "missing";
+  const indexReady = qaState === "ready";
+  const jobRunning = qaState === "building";
+  const recovery = {
+    missing: { label: "Build Q&A index", help: qjs?.detail || "No index exists for this analysis." },
+    failed: { label: "Retry index build", help: qjs?.detail || "The previous build failed." },
+    stale: { label: "Rebuild for current data", help: qjs?.detail || "This index belongs to older data." },
+  }[qaState];
 
-  return `<div style="padding:1rem">
+  return `<div class="qa-workbench">
     ${qaJobBar(qjs)}
 
-    <!-- Index controls -->
     <section class="panel" style="margin-bottom:1rem">
-      <div class="panel-head"><h3>Q&amp;A Index</h3></div>
+      <div class="panel-head"><h3>Ask your evidence</h3><small>${esc(qaState)}</small></div>
       <p style="font-size:0.875rem;margin:0 0 0.5rem">
-        Build a FAISS vector index from classified comments so you can ask natural-language questions
-        and get evidence-backed answers. Classification must run first.
+        Ask natural-language questions and get answers grounded in the current classified Reddit evidence.
       </p>
-      <div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
-        <button id="qaBuildIndexBtn" class="button primary" ${!hasClassified || jobRunning ? "disabled" : ""}>
-          ${indexReady ? "Rebuild index" : "Build index"}
-        </button>
-        <button id="qaRefreshBtn" class="button">Refresh status</button>
-      </div>
       ${!hasClassified
         ? `<div class="notice" style="margin-top:0.5rem">Classify data first before building the Q&amp;A index.</div>`
-        : !indexReady && !jobRunning
-          ? `<div class="notice" style="margin-top:0.5rem">No index yet. Click <em>Build index</em> to start.</div>`
+        : recovery
+          ? `<div class="notice" style="margin-top:0.5rem">${esc(recovery.help)}</div>
+             <button id="qaBuildIndexBtn" class="button primary" type="button">${esc(recovery.label)}</button>`
+          : qaState === "blocked_no_api_key"
+            ? `<div class="notice error" style="margin-top:0.5rem">${esc(qjs?.detail || "Add an API key before using Q&A.")}</div>
+               <button class="button" type="button" data-jump="settings">Open Settings</button>`
           : ""
       }
-      ${indexReady && qjs.doc_count != null
-        ? `<div class="notice success" style="margin-top:0.5rem">${fmt.format(qjs.doc_count)} docs indexed.</div>`
+      ${indexReady && qjs?.doc_count != null
+        ? `<div class="notice success" style="margin-top:0.5rem">Ready · ${fmt.format(qjs.doc_count)} docs indexed for this generation.</div>`
         : ""
       }
     </section>
@@ -124,7 +126,7 @@ export function qaView() {
 // Q&A polling
 // ---------------------------------------------------------------------------
 
-function clearQaPolling() {
+export function stopQaPolling() {
   if (state.qaPollTimer) {
     window.clearInterval(state.qaPollTimer);
     state.qaPollTimer = null;
@@ -132,7 +134,7 @@ function clearQaPolling() {
 }
 
 function startQaPolling(jobId = "") {
-  clearQaPolling();
+  stopQaPolling();
   state.qaPollTimer = window.setInterval(() => pollQaStatus(jobId), 2000);
 }
 
@@ -141,19 +143,18 @@ async function pollQaStatus(jobId = "") {
     const params = jobId ? { tag: state.tag, job_id: jobId } : { tag: state.tag };
     const status = await request(apiUrl("/api/qa/status", params));
     state.qaJobStatus = status;
-    // Q&A is now embedded inside the "explorer" tab, not its own "qa" tab.
-    if (state.view === "explorer") render();
-    const done = ["completed", "failed", "interrupted"].includes(status.state);
+    if (state.view === "dashboard") render();
+    const done = ["ready", "failed", "stale", "missing", "blocked_no_api_key"].includes(status.state);
     if (done) {
-      clearQaPolling();
-      if (status.state === "completed") {
+      stopQaPolling();
+      if (status.state === "ready") {
         setNotice("Q&A index built. You can now ask questions.", "success");
       } else {
         setNotice(`Index build ${status.state}.`, "error");
       }
     }
   } catch {
-    clearQaPolling();
+    stopQaPolling();
   }
 }
 
@@ -161,8 +162,8 @@ export async function refreshQaStatus() {
   try {
     const status = await request(apiUrl("/api/qa/status", { tag: state.tag }));
     state.qaJobStatus = status;
-    if (state.view === "explorer") render();
-    if (status.state === "running") startQaPolling(status.job_id);
+    if (state.view === "dashboard") render();
+    if (status.state === "building") startQaPolling(status.job_id);
   } catch (error) {
     setNotice(error.message, "error");
   }
@@ -186,11 +187,11 @@ export async function startQaBuildIndex() {
         api_key: state.apiKey,
       }),
     });
-    state.qaJobStatus = status;
+    state.qaJobStatus = { ...status, state: "building" };
     state.qaHits = null;
     state.qaAnswer = null;
-    if (state.view === "explorer") render();
-    if (status.state === "running") {
+    if (state.view === "dashboard") render();
+    if (["running", "pending"].includes(status.state)) {
       setNotice("Index build started.");
       startQaPolling(status.job_id);
     }
@@ -222,7 +223,7 @@ export async function submitQaQuestion() {
     });
     state.qaHits = result.hits || [];
     state.qaAnswer = result.answer || "";
-    if (state.view === "explorer") render();
+    if (state.view === "dashboard") render();
   } catch (error) {
     setNotice(error.message, "error");
   } finally {
@@ -252,10 +253,16 @@ export async function submitQaSearch() {
     });
     state.qaHits = result.hits || [];
     state.qaAnswer = null;
-    if (state.view === "explorer") render();
+    if (state.view === "dashboard") render();
   } catch (error) {
     setNotice(error.message, "error");
   } finally {
     setBusy(btn, false, "Search only");
   }
+}
+
+export function bindQaEvents() {
+  $("#qaBuildIndexBtn")?.addEventListener("click", startQaBuildIndex);
+  $("#qaSubmitBtn")?.addEventListener("click", submitQaQuestion);
+  $("#qaSearchBtn")?.addEventListener("click", submitQaSearch);
 }

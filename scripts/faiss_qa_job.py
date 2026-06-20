@@ -15,7 +15,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from src.gm_insights import ProviderConfig, load_classified
 from src.jobs import job_path, write_status
-from src.qa_retrieval import build_qa_index
+from src.qa_retrieval import build_qa_index, classified_fingerprint
 
 
 def run_faiss_qa_job(
@@ -26,6 +26,8 @@ def run_faiss_qa_job(
     provider: ProviderConfig,
     embedding_model: str = "text-embedding-3-small",
     output_root: Path | None = None,
+    generation_id: str = "",
+    run_id: str = "",
 ) -> None:
     """Load classified data, embed docs, build FAISS index, persist artifacts."""
     status_path = job_path(runtime_root, tag, job_id)
@@ -50,6 +52,9 @@ def run_faiss_qa_job(
             runtime_root=destination_root,
             embedding_model=embedding_model,
             heartbeat_cb=heartbeat,
+            input_fingerprint=classified_fingerprint(classified_path),
+            generation_id=generation_id,
+            run_id=run_id,
         )
 
         write_status(status_path, {
@@ -80,6 +85,8 @@ def main() -> None:
     # Data
     parser.add_argument("--classified_path", required=True)
     parser.add_argument("--output_root", default="")
+    parser.add_argument("--generation_id", default="")
+    parser.add_argument("--run_id", default="")
 
     # Embedding model
     parser.add_argument("--embedding_model", default="text-embedding-3-small")
@@ -108,6 +115,8 @@ def main() -> None:
         provider=provider,
         embedding_model=args.embedding_model,
         output_root=Path(args.output_root) if args.output_root else None,
+        generation_id=args.generation_id,
+        run_id=args.run_id,
     )
 
 

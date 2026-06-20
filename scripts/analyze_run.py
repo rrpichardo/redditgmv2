@@ -877,7 +877,10 @@ class AnalysisCoordinator:
                 "--cluster_prompt_path", str(self.prompt_snapshot_path),
             ]
         if step == "qa_index":
-            args += ["--embedding_model", self.config.embedding_model]
+            args += [
+                "--embedding_model", self.config.embedding_model,
+                "--run_id", self.run_id,
+            ]
         env: dict[str, str] = {}
         if self.config.api_key:
             env[self.config.api_key_env] = self.config.api_key

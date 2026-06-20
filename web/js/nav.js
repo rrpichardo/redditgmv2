@@ -8,8 +8,10 @@ import { explorerView, bindExplorerEvents } from "./views/explore.js";
 import { gatheringView, bindGatheringEvents } from "./views/gathering.js";
 import { pipelineView, bindPipelineEvents } from "./views/pipeline.js";
 import { settingsView, bindSettingsEvents } from "./views/settings.js";
+import { bindQaEvents, stopQaPolling } from "./views/qa.js";
 
 export function setView(view) {
+  stopQaPolling();
   state.view = view;
   // Sync visual and accessibility state for the single active tab.
   $$(".tab").forEach((tab) => {
@@ -87,4 +89,5 @@ export function bindViewEvents() {
   bindGatheringEvents();
   bindPipelineEvents();
   bindExplorerEvents();  // covers filters + Q&A buttons
+  bindQaEvents();
 }

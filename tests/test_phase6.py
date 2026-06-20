@@ -426,7 +426,7 @@ class TestQaBuildIndexEndpoint:
         self._make_classified_csv(runtime)
         fake_status = self._fake_job_status()
         with patch("app.start_job", return_value=fake_status):
-            response = client.post("/api/qa/build-index", json={"tag": "test_tag"})
+            response = client.post("/api/qa/build-index", json={"tag": "test_tag", "api_key": "fake-key"})
         assert response.status_code == 200
         assert response.json().get("started") is True
 
@@ -450,11 +450,11 @@ class TestQaStatusEndpoint:
         from fastapi.testclient import TestClient
         return TestClient(app_module.app), tmp_path / "runtime"
 
-    def test_returns_idle_when_no_jobs(self, client_and_runtime):
+    def test_returns_blocked_without_key_when_no_jobs(self, client_and_runtime):
         client, _ = client_and_runtime
         response = client.get("/api/qa/status", params={"tag": "empty_tag"})
         assert response.status_code == 200
-        assert response.json()["state"] == "idle"
+        assert response.json()["state"] == "blocked_no_api_key"
 
     def test_returns_status_by_job_id(self, client_and_runtime):
         from src.jobs import write_status, job_path
@@ -472,7 +472,7 @@ class TestQaStatusEndpoint:
         })
         response = client.get("/api/qa/status", params={"tag": tag, "job_id": job_id})
         assert response.status_code == 200
-        assert response.json()["state"] == "completed"
+        assert response.json()["state"] == "blocked_no_api_key"
 
     def test_filters_by_kind(self, client_and_runtime):
         from src.jobs import write_status, job_path
@@ -490,8 +490,8 @@ class TestQaStatusEndpoint:
         })
         response = client.get("/api/qa/status", params={"tag": tag})
         assert response.status_code == 200
-        # Should return idle because there are no faiss_qa jobs
-        assert response.json()["state"] == "idle"
+        # Trend jobs do not change the Q&A projection.
+        assert response.json()["state"] == "blocked_no_api_key"
 
 
 class TestQaSearchEndpoint:
@@ -507,8 +507,8 @@ class TestQaSearchEndpoint:
         response = client.post("/api/qa/search", json={
             "tag": "no_index_tag", "query": "transmission issues"
         })
-        assert response.status_code == 400
-        assert "build-index" in response.json()["detail"].lower()
+        assert response.status_code == 409
+        assert response.json()["detail"]["state"] == "blocked_no_api_key"
 
     def test_400_when_empty_query(self, client_and_runtime):
         client, _ = client_and_runtime
@@ -520,13 +520,21 @@ class TestQaSearchEndpoint:
     def test_returns_hits_with_real_index(self, client_and_runtime):
         client, runtime = client_and_runtime
         df = _make_classified_df(_N_ROWS)
+        from src.gm_insights import save_classified
+        from src.qa_retrieval import classified_fingerprint
+        classified = runtime / "test_tag" / "classified" / "classified_posts.csv"
+        save_classified(df, classified)
         with patch("src.qa_retrieval.embed_texts", side_effect=_fake_embed):
-            build_qa_index("test_tag", df, _FAKE_PROVIDER, runtime)
+            build_qa_index(
+                "test_tag", df, _FAKE_PROVIDER, runtime,
+                input_fingerprint=classified_fingerprint(classified),
+            )
         with patch("src.qa_retrieval.embed_texts", side_effect=_fake_embed):
             response = client.post("/api/qa/search", json={
                 "tag": "test_tag",
                 "query": "silverado transmission problem",
                 "provider": "openrouter",
+                "api_key": "fake-key",
                 "k": 4,
             })
         assert response.status_code == 200
@@ -549,7 +557,7 @@ class TestQaAnswerEndpoint:
         response = client.post("/api/qa/answer", json={
             "tag": "no_index_tag", "question": "What are common issues?"
         })
-        assert response.status_code == 400
+        assert response.status_code == 409
 
     def test_400_when_empty_question(self, client_and_runtime):
         client, _ = client_and_runtime
@@ -561,8 +569,15 @@ class TestQaAnswerEndpoint:
     def test_returns_answer_with_mocked_llm(self, client_and_runtime):
         client, runtime = client_and_runtime
         df = _make_classified_df(_N_ROWS)
+        from src.gm_insights import save_classified
+        from src.qa_retrieval import classified_fingerprint
+        classified = runtime / "test_tag" / "classified" / "classified_posts.csv"
+        save_classified(df, classified)
         with patch("src.qa_retrieval.embed_texts", side_effect=_fake_embed):
-            build_qa_index("test_tag", df, _FAKE_PROVIDER, runtime)
+            build_qa_index(
+                "test_tag", df, _FAKE_PROVIDER, runtime,
+                input_fingerprint=classified_fingerprint(classified),
+            )
 
         openai_mock = MagicMock()
         mock_client = MagicMock()

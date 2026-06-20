@@ -13,6 +13,7 @@ Artifacts stored under runtime/<tag>/qa/:
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import time
 from pathlib import Path
@@ -44,6 +45,149 @@ from src.trend_insights import (
 
 def qa_dir(runtime_root: Path, tag: str) -> Path:
     return latest_output_root(runtime_root, tag) / "qa"
+
+
+def classified_fingerprint(path: Path) -> str:
+    """Return a stable SHA-256 for the exact classified input bytes."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def published_generation_identity(runtime_root: Path, tag: str) -> tuple[str, str, Path]:
+    output = latest_output_root(runtime_root, tag)
+    tag_root = Path(runtime_root) / tag
+    generation_id = ""
+    try:
+        resolved = output.resolve()
+        if resolved != tag_root.resolve() and resolved.parent.name == "generations":
+            generation_id = resolved.name
+    except OSError:
+        pass
+    run_id = ""
+    for marker in (output / "qa" / ".run_id", output / "classified" / ".run_id"):
+        if marker.exists():
+            run_id = marker.read_text(encoding="utf-8").strip()
+            if run_id:
+                break
+    return generation_id, run_id, output
+
+
+def qa_status_payload(
+    runtime_root: Path,
+    tag: str,
+    *,
+    api_key_available: bool,
+    job_status: dict[str, Any] | None = None,
+    analysis_running: bool = False,
+) -> dict[str, Any]:
+    """Project artifacts, jobs, provenance, and credentials into one Q&A state."""
+    generation_id, current_run_id, output = published_generation_identity(runtime_root, tag)
+    classified = output / "classified" / "classified_posts.csv"
+    current_fingerprint = classified_fingerprint(classified) if classified.exists() else ""
+    base: dict[str, Any] = {
+        "tag": tag,
+        "generation_id": generation_id,
+        "run_id": current_run_id,
+        "current_input_fingerprint": current_fingerprint,
+        "api_key_available": api_key_available,
+    }
+
+    if job_status and job_status.get("state") in {"pending", "running"}:
+        return {
+            **base,
+            **job_status,
+            "state": "building",
+            "reason_code": "index_build_running",
+            "detail": "The Q&A index is building for this analysis.",
+            "recovery_action": None,
+        }
+
+    qdir = output / "qa"
+    docs_path, index_path, metadata_path = qdir / "docs.json", qdir / "index.faiss", qdir / "metadata.json"
+    metadata: dict[str, Any] = {}
+    artifacts_exist = docs_path.exists() and index_path.exists() and metadata_path.exists()
+    if artifacts_exist:
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return {
+                **base,
+                "state": "failed",
+                "reason_code": "invalid_metadata",
+                "detail": f"Q&A metadata could not be read: {exc}",
+                "recovery_action": "retry",
+            }
+
+        artifact_fingerprint = str(metadata.get("input_fingerprint", ""))
+        identity = {
+            "generation_id": str(metadata.get("generation_id") or generation_id),
+            "run_id": str(metadata.get("run_id") or current_run_id),
+            "input_fingerprint": artifact_fingerprint,
+            "doc_count": metadata.get("doc_count", 0),
+            "metadata": metadata,
+        }
+        if current_fingerprint and artifact_fingerprint == current_fingerprint:
+            if not api_key_available:
+                return {
+                    **base,
+                    **identity,
+                    "state": "blocked_no_api_key",
+                    "reason_code": "api_key_required",
+                    "detail": "The current index is built, but Q&A needs an API key for query embeddings.",
+                    "recovery_action": "configure_api_key",
+                }
+            return {
+                **base,
+                **identity,
+                "state": "ready",
+                "reason_code": None,
+                "detail": "Q&A index matches the current classified input.",
+                "recovery_action": None,
+            }
+        return {
+            **base,
+            **identity,
+            "state": "stale",
+            "reason_code": "input_fingerprint_mismatch",
+            "detail": "The Q&A index belongs to an older classified input.",
+            "recovery_action": "rebuild",
+        }
+
+    if job_status and job_status.get("state") in {"failed", "interrupted"}:
+        return {
+            **base,
+            **job_status,
+            "state": "failed",
+            "reason_code": "index_build_failed",
+            "detail": str(job_status.get("error") or "The previous Q&A index build failed."),
+            "recovery_action": "retry",
+        }
+    if analysis_running:
+        return {
+            **base,
+            "state": "building",
+            "reason_code": "analysis_running",
+            "detail": "Analysis is running; Q&A will become available after its index step publishes.",
+            "recovery_action": None,
+        }
+    if not api_key_available:
+        return {
+            **base,
+            "state": "blocked_no_api_key",
+            "reason_code": "api_key_required",
+            "detail": "Add an API key in Settings before building the Q&A index.",
+            "recovery_action": "configure_api_key",
+        }
+    return {
+        **base,
+        "state": "missing",
+        "reason_code": "index_missing" if current_fingerprint else "classified_input_missing",
+        "detail": "No Q&A index exists for the current classified input." if current_fingerprint else "Classify data before building Q&A.",
+        "recovery_action": "build" if current_fingerprint else None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +281,9 @@ def build_qa_index(
     runtime_root: Path,
     embedding_model: str = EMBEDDING_MODEL,
     heartbeat_cb: Callable[[int, int], None] | None = None,
+    input_fingerprint: str = "",
+    generation_id: str = "",
+    run_id: str = "",
 ) -> dict:
     """Full pipeline: classify → embed → FAISS → persist artifacts.
 
@@ -183,6 +330,9 @@ def build_qa_index(
         "doc_count": n,
         "created_at": time.time(),
         "tag": tag,
+        "input_fingerprint": input_fingerprint,
+        "generation_id": generation_id,
+        "run_id": run_id,
     })
 
     return {

@@ -1552,6 +1552,8 @@ def qa_build_index(request: QaBuildIndexRequest) -> JSONResponse:
             detail="No classified CSV found for this tag. Run classification first.",
         )
     pcfg = provider_config(request.provider, request.model, request.api_key)
+    if not pcfg.api_key:
+        raise HTTPException(status_code=400, detail="An API key is required to build the Q&A index.")
     env: dict[str, str] = {}
     if pcfg.api_key:
         env[pcfg.api_key_env] = pcfg.api_key
@@ -1563,6 +1565,9 @@ def qa_build_index(request: QaBuildIndexRequest) -> JSONResponse:
         "--model", pcfg.model,
         "--api_key_env", pcfg.api_key_env,
     ]
+    from src.qa_retrieval import published_generation_identity
+    generation_id, run_id, _ = published_generation_identity(RUNTIME, tag)
+    extra_args += ["--generation_id", generation_id, "--run_id", run_id]
     status = start_job(
         RUNTIME, tag, "faiss_qa",
         ROOT / "scripts" / "faiss_qa_job.py",
@@ -1575,7 +1580,8 @@ def qa_build_index(request: QaBuildIndexRequest) -> JSONResponse:
 
 @app.get("/api/qa/status")
 def qa_status(tag: str = DEFAULT_TAG, job_id: str = "") -> JSONResponse:
-    """Return the most recent Q&A index build job status."""
+    """Return generation-aware Q&A readiness and recovery state."""
+    from src.qa_retrieval import qa_status_payload
     tag = clean_tag(tag)
     if job_id:
         status = read_status(job_path(RUNTIME, tag, job_id))
@@ -1590,18 +1596,45 @@ def qa_status(tag: str = DEFAULT_TAG, job_id: str = "") -> JSONResponse:
                 ]
                 if all_jobs:
                     status = max(all_jobs, key=lambda s: float(s.get("started_at", 0)))
-    if not status:
-        return safe_json({"state": "idle", "tag": tag})
-    return safe_json(status)
+    with RunStore(RUNTIME / "runs.db") as store:
+        store.reconcile_tag_lock(tag)
+        analysis_running = store.get_tag_lock(tag) is not None
+    api_key_available = bool(
+        load_api_key()
+        or os.getenv("OPENROUTER_API_KEY", "")
+        or os.getenv("OPENAI_API_KEY", "")
+    )
+    return safe_json(
+        qa_status_payload(
+            RUNTIME,
+            tag,
+            api_key_available=api_key_available,
+            job_status=status,
+            analysis_running=analysis_running,
+        )
+    )
 
 
 @app.post("/api/qa/search")
 def qa_search(request: QaSearchRequest) -> JSONResponse:
     """Return top-k retrieved evidence docs for a query (no LLM generation)."""
-    from src.qa_retrieval import load_qa_artifacts, retrieve
+    from src.qa_retrieval import load_qa_artifacts, qa_status_payload, retrieve
     tag = clean_tag(request.tag)
     if not request.query.strip():
         raise HTTPException(status_code=400, detail="query must not be empty.")
+    with RunStore(RUNTIME / "runs.db") as store:
+        store.reconcile_tag_lock(tag)
+        analysis_running = store.get_tag_lock(tag) is not None
+    status = qa_status_payload(
+        RUNTIME,
+        tag,
+        api_key_available=bool(
+            request.api_key or load_api_key() or os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
+        ),
+        analysis_running=analysis_running,
+    )
+    if status.get("state") != "ready":
+        raise HTTPException(status_code=409, detail=status)
     try:
         docs, index, metadata = load_qa_artifacts(RUNTIME, tag)
     except FileNotFoundError as exc:
@@ -1623,10 +1656,23 @@ def qa_search(request: QaSearchRequest) -> JSONResponse:
 @app.post("/api/qa/answer")
 def qa_answer(request: QaAnswerRequest) -> JSONResponse:
     """Retrieve evidence and generate an LLM-grounded answer."""
-    from src.qa_retrieval import answer_question, load_qa_artifacts, retrieve
+    from src.qa_retrieval import answer_question, load_qa_artifacts, qa_status_payload, retrieve
     tag = clean_tag(request.tag)
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="question must not be empty.")
+    with RunStore(RUNTIME / "runs.db") as store:
+        store.reconcile_tag_lock(tag)
+        analysis_running = store.get_tag_lock(tag) is not None
+    status = qa_status_payload(
+        RUNTIME,
+        tag,
+        api_key_available=bool(
+            request.api_key or load_api_key() or os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
+        ),
+        analysis_running=analysis_running,
+    )
+    if status.get("state") != "ready":
+        raise HTTPException(status_code=409, detail=status)
     try:
         docs, index, metadata = load_qa_artifacts(RUNTIME, tag)
     except FileNotFoundError as exc:
