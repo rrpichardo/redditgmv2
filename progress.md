@@ -1,16 +1,42 @@
-# Pipeline Hardening Progress
+# Plan B Progress
 
-## 2026-06-19
+## 2026-06-20
 
-- Diagnosed the dependency, authentication, run-status race, retry-lock, clustering, and Unicode PDF failures against live runtime artifacts.
-- User selected Option 2: targeted end-to-end hardening.
-- Created branch `codex/pipeline-hardening` from `c0ecddd`.
-- Wrote and self-reviewed the approved design specification.
-- Verified review feedback against the coordinator, lock store, retry client, branch graph, and both runtime ledgers.
-- Revised the design with an atomic reservation/adoption protocol, orphan reconciliation, UI-only 409 handling, and a `main` rollout using an explicit live runtime root.
-- Baseline test attempt stopped before collection because the shared `.venv` did not contain pytest; recorded as an environment setup issue.
-- Installed pytest and pytest-playwright into the shared project `.venv`.
-- Verified the untouched baseline: 286 tests passed with 3 pre-existing warnings in 44.63 seconds.
-- Wrote the test-first implementation plan at `docs/superpowers/plans/2026-06-19-pipeline-hardening.md`.
-- Task 1 RED: reservation, explicit job identity, strict adoption, immediate status, concurrency, and spawn-failure tests failed for the expected missing contracts.
-- Task 1 GREEN: 58 focused tests passed after atomic reservation/adoption and API handoff changes.
+- Read the complete attached two-plan document and isolated Plan B as the requested scope.
+- Confirmed this checkout is clean and exactly matches Plan B's target commit `c7a02de`.
+- Confirmed the checkout is detached and will need a `codex/...` branch before commits.
+- Replaced stale root planning notes from the unrelated pipeline-hardening worktree with Plan B tracking notes.
+- Reviewed prior repo-family operating notes: exact worktree/revision reporting, detached-HEAD handling, project-venv testing, and HTTP/browser runtime proof remain required.
+- Confirmed `.git` uses a linked-worktree Git dir distinct from the common repo; the first combined probe short-circuited on the expected no-superproject result and was recorded for a corrected retry.
+- Created branch `codex/plan-b-standalone` from `c7a02de` in the existing isolated linked worktree.
+- Confirmed this worktree has no local `.venv`; the shared project virtual environment remains the intended test interpreter.
+- Verified 284 backend tests pass in the sandbox; 20 remaining tests were blocked at localhost bind setup, and a requested unsandboxed rerun was later terminated after producing no output.
+- Mapped the current Plan B API surfaces and confirmed the attachment's claimed gaps against `app.py`.
+- Inspected analytics, config, Q&A, pipeline, and frontend modules to lock Plan B's implementation boundaries.
+- Identified concrete generation, attempt-metadata, chart-presentation, API-test, and isolated-runtime hooks for the implementation plan.
+- Wrote, self-reviewed, and committed the approved design as `fb1da32`.
+- Wrote, self-reviewed, and committed the TDD implementation plan as `4004161`.
+- Began inline execution with B0 as the first red-green slice.
+- B0 RED: 9 backend tests failed for the missing time-series contract, then 2 frontend contract tests failed for the generic date message and empty trend charts.
+- B0 GREEN: 11 Plan B tests passed; the broader trend/chart slice passed 56 tests with 13 pre-existing warnings.
+- B1/B2 RED: normalization lacked distinct post/comment fields, evidence sorting lacked stable IDs, and `/api/evidence` returned 404.
+- B1/B2 GREEN: 11 evidence tests passed and the broader normalization/chart slice passed 43 tests with 3 pre-existing warnings.
+- B2/B3 RED: six frontend contracts failed for score/search copy, server pagination, evidence structure, grouping, Q&A placement, and clamp styling.
+- B2/B3 browser verification caught a one-based pager off-by-one; after correction, 36 Plan B and existing browser tests passed with one warning.
+- B4/B5 RED: six tests failed for missing complaint presentation metadata, sentinel leakage, lookback controls, and legacy documentation.
+- B4/B5 GREEN: 39 presentation, chart, and browser regressions passed with one warning.
+- B6 RED: store operations, CRUD routes, collection snapshots, health metadata, and editor contracts failed as expected.
+- B6 regressions exposed and fixed an empty-frame complaint metadata bug plus an unescaped template-literal backtick.
+- B6 GREEN: 20 dedicated backend/browser tests passed; the existing 28-test browser suite and 44-test backend integration slice also passed.
+- B7 RED: prompt helpers, validation/reset routes, run snapshots, and Settings controls were absent.
+- B7 GREEN: 74 prompt/coordinator/clustering tests passed; two focused Chromium Settings tests passed.
+- B8 RED: fingerprint helpers, generation-aware states, stale guards, Dashboard Q&A composition, and navigation cleanup were absent.
+- B8 updated the legacy Phase 6 expectations to the new readiness contract; 69 Q&A/coordinator tests and 39 Plan B/existing browser tests passed.
+- B9 RED: six tests failed for the absent canonical report model, Markdown output, partial-failure state, generation-scoped downloads, and independent UI links.
+- B9 GREEN: one canonical model now drives Markdown and PDF, report provenance is generation/run aware, and PDF failure retains a valid Markdown artifact with `completed_with_warnings`.
+- B9 compatibility verification exposed and fixed two stale fixtures: the old PDF-only renderer patch and a Q&A fingerprint fixture with no source bytes.
+- B9 verification passed 69 dedicated Plan B backend tests, 102 worker/coordinator/API regressions, and 11 actual Chromium tests.
+- B10 full-suite verification passed all 385 tests in 64.78 seconds.
+- B10 isolated-runtime verification launched the app against `/tmp/redditgmv2-plan-b-live.42hSOC`; health, HTML, static modules, empty-state APIs, and graceful shutdown were all proven live without touching the real runtime.
+- The isolated in-app browser rendered Dashboard and Data Gathering, exposed the named-list editor, and reported no console errors.
+- Confirmed Plan A remained excluded: `GET /api/dashboard` returned 404 and no Plan A contract/evaluator was added.
