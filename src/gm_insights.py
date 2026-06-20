@@ -770,6 +770,41 @@ def complaint_summary(df: pd.DataFrame) -> pd.DataFrame:
     return value_counts_df(complaints, "top_complaint_category", "theme", 12)
 
 
+def complaint_chart_presentation(df: pd.DataFrame) -> dict[str, Any]:
+    """Return complaint rows and record counts for chart presentation."""
+    analyzed = analyzed_frame(df)
+    complaints = analyzed[analyzed["complaint"] == 1]
+    sentinels = {"", "not_applicable", "none", "unknown", "nan", "null", "skipped", "error"}
+    counts: Counter[str] = Counter()
+    applicable = 0
+    for _, row in complaints.iterrows():
+        mentions: list[str] = []
+        primary = _text(row.get("top_complaint_category")).strip()
+        if primary.lower() not in sentinels:
+            mentions.append(primary)
+        secondary = _text(row.get("multi_complaint_categories"))
+        for value in (part.strip() for part in secondary.split(",")):
+            if value.lower() not in sentinels and value not in mentions:
+                mentions.append(value)
+        if mentions:
+            applicable += 1
+            counts.update(mentions)
+    total_mentions = sum(counts.values())
+    items = [
+        {"theme": theme, "count": count, "pct": percent(count, total_mentions)}
+        for theme, count in counts.most_common(12)
+    ]
+    total_complaints = len(complaints)
+    return {
+        "items": items,
+        "counts": {
+            "total_complaints": total_complaints,
+            "applicable": applicable,
+            "excluded": total_complaints - applicable,
+        },
+    }
+
+
 def all_complaint_mentions(df: pd.DataFrame) -> pd.DataFrame:
     analyzed = analyzed_frame(df)
     complaints = analyzed[analyzed["complaint"] == 1]

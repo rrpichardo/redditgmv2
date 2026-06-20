@@ -82,12 +82,6 @@ export function settingsView() {
               value="${col.comments_limit ?? 5}" />
             <small>Top comments pulled per post (0 = posts only).</small>
           </div>
-          <div class="control">
-            <label for="cfg-since-days">Lookback window (days)</label>
-            <input id="cfg-since-days" name="since_days" type="number" min="0"
-              value="${col.since_days ?? 0}" />
-            <small>0 = no date filter. 30 = last 30 days only.</small>
-          </div>
         </div>
       </section>
 
@@ -183,7 +177,6 @@ async function saveConfig() {
   const defaultTag   = document.getElementById("cfg-tag")?.value?.trim();
   const listingLimit = parseInt(document.getElementById("cfg-listing-limit")?.value, 10);
   const commentsLimit= parseInt(document.getElementById("cfg-comments-limit")?.value, 10);
-  const sinceDays    = parseInt(document.getElementById("cfg-since-days")?.value, 10);
   const nClusters    = parseInt(document.getElementById("cfg-clusters")?.value, 10);
   const classifyLimit= parseInt(document.getElementById("cfg-classify-limit")?.value, 10);
   const qaK          = parseInt(document.getElementById("cfg-qa-k")?.value, 10);
@@ -201,7 +194,6 @@ async function saveConfig() {
       default_tag: defaultTag,
       listing_limit: listingLimit,
       comments_limit: commentsLimit,
-      since_days: sinceDays,
     },
     analysis: {
       n_clusters: nClusters,

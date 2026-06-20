@@ -25,7 +25,6 @@ DEFAULTS: dict[str, Any] = {
         "default_tag": "gm_vehicle_on_demand",
         "listing_limit": 100,
         "comments_limit": 5,
-        "since_days": 0,
     },
     "analysis": {
         "n_clusters": 10,

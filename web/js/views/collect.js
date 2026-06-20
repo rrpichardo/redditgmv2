@@ -23,9 +23,6 @@ export function collectView() {
           <div class="control"><label for="commentsLimit">Comments per post</label>
             <input id="commentsLimit" type="number" min="0" max="25" value="5">
           </div>
-          <div class="control"><label for="sinceDays">Since days</label>
-            <input id="sinceDays" type="number" min="0" max="3650" value="0">
-          </div>
           <div class="control wide"><label for="customSubs">Custom subreddits</label>
             <textarea id="customSubs" placeholder="Silverado&#10;Chevy"></textarea>
           </div>
@@ -137,7 +134,6 @@ export async function collect() {
     subreddits: $("#customSubs").value,
     listing_limit: Number($("#listingLimit").value || 100),
     comments_limit: Number($("#commentsLimit").value || 5),
-    since_days: Number($("#sinceDays").value || 0),
     dry_run: $("#dryRun").value === "true",
   };
   try {

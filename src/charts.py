@@ -26,6 +26,7 @@ from src.gm_insights import (
     complaint_by_model_table,
     complaint_summary,
     competitor_breakdown_detail,
+    complaint_chart_presentation,
     engagement_breakdown,
     engagement_weighted_themes,
     ev_comparison,
@@ -135,7 +136,7 @@ CHART_SPECS: dict[str, dict[str, Any]] = {
         "sort": "value_desc",
         "value_format": "count",
         "minimum_rows": 1,
-        "fallback": "No complaint themes yet.",
+        "fallback": "No applicable complaint themes in this view.",
     },
     "all_complaint_mentions": {
         "type": "bar",
@@ -345,7 +346,7 @@ def build_chart_data(df: pd.DataFrame) -> dict[str, Any]:
         "comment_type": _records(comment_type_dist(analyzed)),
         "engagement": _records(engagement_breakdown(analyzed)),
         # Complaint themes
-        "complaints": _records(complaint_summary(analyzed)),
+        "complaints": complaint_chart_presentation(analyzed)["items"],
         "all_complaint_mentions": _records(all_complaint_mentions(analyzed)),
         "engagement_weighted_themes": _records(engagement_weighted_themes(analyzed)),
         # EV / competitor
@@ -388,7 +389,9 @@ def build_detail_data(df: pd.DataFrame) -> dict[str, Any]:
 
 def build_chart_payload(df: pd.DataFrame) -> dict[str, Any]:
     """Return chart_specs + chart_data for the /api/run response."""
+    complaint_presentation = complaint_chart_presentation(df)
     return {
         "chart_specs": CHART_SPECS,
         "chart_data": build_chart_data(df),
+        "chart_meta": {"complaints": complaint_presentation["counts"]},
     }

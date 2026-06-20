@@ -38,3 +38,7 @@ By default the app calls:
 ```
 
 Set `REDDITGM_LEGACY_ROOT` to point somewhere else.
+
+The web app intentionally does not expose a `since_days` lookback control. Collection depth comes
+from accumulated duplicate-safe runs. The backend still accepts `since_days` only for legacy
+compatibility with older direct API clients; new browser requests do not send it.

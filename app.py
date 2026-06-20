@@ -634,6 +634,7 @@ def run_snapshot(tag: str, filters: dict[str, Any] | None = None) -> dict[str, A
         # Phase 1 chart contract — browser and export renderers should prefer these.
         "chart_specs": chart_contract["chart_specs"],
         "chart_data": chart_contract["chart_data"],
+        "chart_meta": chart_contract["chart_meta"],
         "evidence": evidence,
         "filterOptions": filter_options(df),
     }
@@ -877,6 +878,8 @@ def collect_data(request: CollectRequest) -> JSONResponse:
         "--progress-every",
         "10",
     ]
+    # Dormant legacy compatibility: the browser no longer sends `since_days`,
+    # but older direct API clients may still opt into the collector flag.
     if request.since_days:
         cmd.extend(["--since-days", str(max(0, request.since_days))])
     if request.dry_run:
