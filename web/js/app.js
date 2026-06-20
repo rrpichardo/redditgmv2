@@ -19,13 +19,14 @@ export async function loadRun({ silent = false } = {}) {
   if (!silent) setNotice("Loading run…");
   try {
     const params = buildFilterParams();
-    const [runResult, trendsResult, timeseriesResult, evidenceResult, listsResult, qaResult] = await Promise.allSettled([
+    const [runResult, trendsResult, timeseriesResult, evidenceResult, listsResult, qaResult, trendReportResult] = await Promise.allSettled([
       request(apiUrl("/api/run", { tag: state.tag, ...params })),
       request(apiUrl("/api/trends", { tag: state.tag })),
       request(apiUrl("/api/trends/timeseries", { tag: state.tag })),
       loadEvidence(),
       request(apiUrl("/api/subreddit-lists")),
       request(apiUrl("/api/qa/status", { tag: state.tag })),
+      request(apiUrl("/api/trends/briefing/status", { tag: state.tag })),
     ]);
 
     if (runResult.status === "rejected") throw runResult.reason;
@@ -40,6 +41,7 @@ export async function loadRun({ silent = false } = {}) {
       state.selectedSubredditListId = state.subredditLists[0]?.id || "";
     }
     state.qaJobStatus = qaResult.status === "fulfilled" ? qaResult.value : null;
+    state.trendBriefingJobStatus = trendReportResult.status === "fulfilled" ? trendReportResult.value : null;
 
     const collectStatus = await request(
       apiUrl("/api/collect/status", { tag: state.tag })

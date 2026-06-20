@@ -260,6 +260,18 @@ export function dashboard() {
   const granularityLabel = tsd?.granularity_label || "time-bucketed";
   // Only show signals section when trends have been fetched and returned clusters.
   const clusters = td?.ok && td.clusters?.length ? td.clusters : null;
+  const reportStatus = state.trendBriefingJobStatus;
+  const reportTag = encodeURIComponent(state.tag);
+  const markdownReady = reportStatus?.formats?.markdown === "ready";
+  const pdfReady = reportStatus?.formats?.pdf === "ready"
+    || (reportStatus?.state === "completed" && !reportStatus?.formats);
+  const reportDownloads = markdownReady || pdfReady
+    ? `<div class="notice" style="margin-bottom:1rem"><strong>Trend report</strong>
+        ${markdownReady ? `<a class="export-chip" href="/api/download/trend-md?tag=${reportTag}">Download Markdown</a>` : ""}
+        ${pdfReady ? `<a class="export-chip" href="/api/download/trend-pdf?tag=${reportTag}">Download PDF</a>` : ""}
+        ${reportStatus?.warning ? `<span>${esc(reportStatus.warning)}</span>` : ""}
+      </div>`
+    : "";
 
   const signalsSection = clusters
     ? `<div style="margin-bottom:4px">
@@ -296,6 +308,7 @@ export function dashboard() {
         <p>These signals are found by clustering your records. They are emerging themes—not fixed categories or subreddit lists.</p>
       </div>
       ${signalsSection}
+      ${reportDownloads}
       ${qaView()}
       <div class="panel-grid two" style="margin-top:0.75rem">
         <section class="panel chart-panel">

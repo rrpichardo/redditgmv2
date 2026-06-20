@@ -1463,7 +1463,7 @@ def trends_timeseries(tag: str = DEFAULT_TAG) -> JSONResponse:
 
 @app.post("/api/trends/briefing")
 def trends_briefing(request: TrendBriefingRequest) -> JSONResponse:
-    """Start a trend briefing PDF job. Returns existing job if one is running."""
+    """Start a Markdown + PDF trend briefing job."""
     tag = clean_tag(request.tag)
     active = find_active_job(RUNTIME, tag, "trend_briefing")
     if active:
@@ -1484,6 +1484,9 @@ def trends_briefing(request: TrendBriefingRequest) -> JSONResponse:
         "--model", pcfg.model,
         "--api_key_env", pcfg.api_key_env,
     ]
+    from src.qa_retrieval import published_generation_identity
+    generation_id, run_id, _ = published_generation_identity(RUNTIME, tag)
+    extra_args += ["--generation_id", generation_id, "--run_id", run_id]
     status = start_job(
         RUNTIME, tag, "trend_briefing",
         ROOT / "scripts" / "trend_briefing_job.py",
@@ -1520,7 +1523,7 @@ def trends_briefing_status(tag: str = DEFAULT_TAG, job_id: str = "") -> JSONResp
 def download_trend_pdf(tag: str = DEFAULT_TAG) -> Response:
     """Download the trend briefing PDF produced by a completed trend_briefing job."""
     clean = clean_tag(tag)
-    path = run_dir(clean) / "downloads" / f"{clean}_trend_briefing.pdf"
+    path = output_dir(clean) / "downloads" / f"{clean}_trend_briefing.pdf"
     if not path.exists():
         raise HTTPException(
             status_code=404,
@@ -1529,6 +1532,23 @@ def download_trend_pdf(tag: str = DEFAULT_TAG) -> Response:
     return FileResponse(
         path, media_type="application/pdf",
         filename=f"{clean}_gm_trend_briefing.pdf",
+    )
+
+
+@app.get("/api/download/trend-md")
+def download_trend_markdown(tag: str = DEFAULT_TAG) -> Response:
+    """Download the Markdown report independently from the optional PDF."""
+    clean = clean_tag(tag)
+    path = output_dir(clean) / "downloads" / f"{clean}_trend_briefing.md"
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Trend briefing Markdown not ready. Start a job with POST /api/trends/briefing first.",
+        )
+    return FileResponse(
+        path,
+        media_type="text/markdown; charset=utf-8",
+        filename=f"{clean}_gm_trend_briefing.md",
     )
 
 

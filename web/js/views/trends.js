@@ -73,13 +73,15 @@ function trendJobBar(status) {
 function trendBriefingBar(status) {
   if (!status || status.state === "idle") return "";
   const state_label = status.state || "idle";
-  const color = { completed: "success", failed: "error", interrupted: "error" }[state_label] || "";
-  const pdfReady = state_label === "completed";
+  const color = { completed: "success", completed_with_warnings: "", failed: "error", interrupted: "error" }[state_label] || "";
+  const markdownReady = status.formats?.markdown === "ready";
+  const pdfReady = status.formats?.pdf === "ready" || (state_label === "completed" && !status.formats);
   const tag = state.tag;
   return `<div class="notice ${color}" style="margin-bottom:0.5rem">
-    Briefing PDF: <strong>${esc(state_label)}</strong>
+    Trend report: <strong>${esc(state_label)}</strong>
+    ${markdownReady ? `<a href="/api/download/trend-md?tag=${encodeURIComponent(tag)}" style="margin-left:0.75rem" class="export-chip">Download Markdown</a>` : ""}
     ${pdfReady ? `<a href="/api/download/trend-pdf?tag=${encodeURIComponent(tag)}" style="margin-left:0.75rem" class="export-chip">Download PDF</a>` : ""}
-    ${status.error ? ` — ${esc(status.error)}` : ""}
+    ${status.warning ? ` — ${esc(status.warning)}` : status.error ? ` — ${esc(status.error)}` : ""}
   </div>`;
 }
 
@@ -129,7 +131,7 @@ export function trendsView() {
           ${hasClusters ? "Re-run clustering" : "Run clustering"}
         </button>
         <button id="refreshTrendsBtn" class="button">Refresh status</button>
-        ${hasClusters ? `<button id="trendBriefingBtn" class="button" ${bjs?.state === "running" ? "disabled" : ""}>Generate briefing PDF</button>` : ""}
+        ${hasClusters ? `<button id="trendBriefingBtn" class="button" ${bjs?.state === "running" ? "disabled" : ""}>Generate trend report</button>` : ""}
         ${bjs?.state === "running" ? `<button id="refreshTrendBriefingBtn" class="button">Refresh briefing</button>` : ""}
       </div>
       ${!hasClassified ? `<div class="notice" style="margin-top:0.5rem">Classify data first before running trend analysis.</div>` : ""}
@@ -200,7 +202,7 @@ async function pollTrendStatus(jobId = "") {
     const status = await request(apiUrl("/api/trends/status", params));
     state.trendJobStatus = status;
     if (state.view === "trends") render();
-    const done = ["completed", "failed", "interrupted"].includes(status.state);
+    const done = ["completed", "completed_with_warnings", "failed", "interrupted"].includes(status.state);
     if (done) {
       clearTrendPolling();
       if (status.state === "completed") {
@@ -284,8 +286,8 @@ async function pollTrendBriefingStatus(jobId = "") {
     const done = ["completed", "failed", "interrupted"].includes(status.state);
     if (done) {
       clearTrendBriefingPolling();
-      if (status.state === "completed") {
-        setNotice("Trend briefing PDF ready for download.", "success");
+      if (["completed", "completed_with_warnings"].includes(status.state)) {
+        setNotice(status.warning || "Trend report ready for download.", status.state === "completed" ? "success" : "");
       } else {
         setNotice(`Trend briefing ${status.state}.`, "error");
       }
@@ -297,7 +299,7 @@ async function pollTrendBriefingStatus(jobId = "") {
 
 export async function startTrendBriefingJob() {
   const btn = $("#trendBriefingBtn");
-  setBusy(btn, true, "Generate briefing PDF");
+  setBusy(btn, true, "Generate trend report");
   try {
     const status = await request("/api/trends/briefing", {
       method: "POST",
@@ -312,12 +314,12 @@ export async function startTrendBriefingJob() {
     state.trendBriefingJobStatus = status;
     if (state.view === "trends") render();
     if (status.state === "running") {
-      setNotice("Trend briefing job started.");
+      setNotice("Trend report job started.");
       startTrendBriefingPolling(status.job_id);
     }
   } catch (error) {
     setNotice(error.message, "error");
-    setBusy(btn, false, "Generate briefing PDF");
+    setBusy(btn, false, "Generate trend report");
   }
 }
 

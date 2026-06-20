@@ -1,5 +1,5 @@
 # scripts/trend_briefing_job.py
-"""Subprocess job: generate a trend briefing PDF from existing cluster + trend signal artifacts."""
+"""Subprocess job: generate Markdown and PDF from one canonical trend report."""
 
 from __future__ import annotations
 
@@ -27,8 +27,10 @@ def run_trend_briefing_job(
     api_key_env: str = "OPENROUTER_API_KEY",
     api_key: str = "",
     output_root: Path | None = None,
+    generation_id: str = "",
+    run_id: str = "",
 ) -> None:
-    """Load cluster artifacts + trend signals, then render a trend briefing PDF."""
+    """Load cluster artifacts and render a generation-attributed trend briefing."""
     status_path = job_path(runtime_root, tag, job_id)
 
     def heartbeat(note: str = "") -> None:
@@ -55,25 +57,51 @@ def run_trend_briefing_job(
         examples: dict = json.loads(examples_path.read_text(encoding="utf-8")) if examples_path.exists() else {}
         signals: dict = json.loads(signals_path.read_text(encoding="utf-8")) if signals_path.exists() else {}
 
-        heartbeat("rendering_pdf")
+        heartbeat("building_report")
 
-        from src.pdf_export import build_trend_briefing_pdf
+        from src.trend_report import TrendReportModel, write_trend_markdown
 
-        downloads = destination_root / tag / "downloads"
-        downloads.mkdir(parents=True, exist_ok=True)
-        pdf_path = downloads / f"{tag}_trend_briefing.pdf"
-
-        build_trend_briefing_pdf(
-            labels=labels,
-            examples=examples,
-            signals=signals,
-            pdf_path=pdf_path,
+        model = TrendReportModel.from_artifacts(
+            labels,
+            examples,
+            signals,
+            tag=tag,
+            generation_id=generation_id,
+            run_id=run_id,
         )
+        downloads = tdir.parent / "downloads"
+        downloads.mkdir(parents=True, exist_ok=True)
+        markdown_path = downloads / f"{tag}_trend_briefing.md"
+        pdf_path = downloads / f"{tag}_trend_briefing.pdf"
+        write_trend_markdown(model, markdown_path)
+
+        heartbeat("rendering_pdf")
+        try:
+            from src.pdf_export import build_trend_report_pdf
+
+            build_trend_report_pdf(model, pdf_path)
+        except Exception as pdf_exc:
+            traceback.print_exc()
+            write_status(status_path, {
+                "state": "completed_with_warnings",
+                "completed_at": time.time(),
+                "artifact_paths": [str(markdown_path)],
+                "failed_artifacts": ["pdf"],
+                "warning": f"Markdown report completed; PDF rendering failed: {pdf_exc}",
+                "formats": {"markdown": "ready", "pdf": "failed"},
+                "generation_id": generation_id,
+                "run_id": run_id,
+            })
+            return
 
         write_status(status_path, {
             "state": "completed",
             "completed_at": time.time(),
-            "artifact_paths": [str(pdf_path)],
+            "artifact_paths": [str(markdown_path), str(pdf_path)],
+            "failed_artifacts": [],
+            "formats": {"markdown": "ready", "pdf": "ready"},
+            "generation_id": generation_id,
+            "run_id": run_id,
         })
 
     except Exception as exc:
@@ -98,6 +126,8 @@ def main() -> None:
     parser.add_argument("--provider", default="openrouter")
     parser.add_argument("--model", default="")
     parser.add_argument("--api_key_env", default="OPENROUTER_API_KEY")
+    parser.add_argument("--generation_id", default="")
+    parser.add_argument("--run_id", default="")
 
     args = parser.parse_args()
 
@@ -109,6 +139,8 @@ def main() -> None:
         model=args.model,
         api_key_env=args.api_key_env,
         output_root=Path(args.output_root) if args.output_root else None,
+        generation_id=args.generation_id,
+        run_id=args.run_id,
     )
 
 

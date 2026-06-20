@@ -541,7 +541,7 @@ _DIRECTION_LABEL = {
 }
 
 
-def build_trend_briefing_pdf(
+def _render_trend_briefing_pdf(
     labels: dict[str, Any],
     examples: dict[str, Any],
     signals: dict[str, Any],
@@ -700,3 +700,22 @@ def build_trend_briefing_pdf(
     pdf.output(str(tmp))
     os.replace(tmp, pdf_path)
     return pdf_path
+
+
+def build_trend_report_pdf(model: "Any", pdf_path: Path) -> Path:
+    """Render the canonical trend report model as a Unicode-safe PDF."""
+    labels, examples, signals = model.to_artifacts()
+    return _render_trend_briefing_pdf(labels, examples, signals, pdf_path)
+
+
+def build_trend_briefing_pdf(
+    labels: dict[str, Any],
+    examples: dict[str, Any],
+    signals: dict[str, Any],
+    pdf_path: Path,
+) -> Path:
+    """Compatibility wrapper that routes legacy callers through the canonical model."""
+    from src.trend_report import TrendReportModel
+
+    model = TrendReportModel.from_artifacts(labels, examples, signals)
+    return build_trend_report_pdf(model, pdf_path)

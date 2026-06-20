@@ -262,10 +262,14 @@ def monitor_job(
         if status is None:
             return StepResult(state="failed", warning="Worker status file disappeared.")
         state = status.get("state")
-        if state == "completed":
-            warning = status.get("trend_warning") or status.get("briefing_warning")
+        if state in _SUCCESS_STATES:
+            warning = (
+                status.get("warning")
+                or status.get("trend_warning")
+                or status.get("briefing_warning")
+            )
             return StepResult(
-                state="completed",
+                state=str(state),
                 processed=int(status.get("processed", status.get("n_docs", 0)) or 0),
                 total=int(status.get("total", status.get("n_docs", 0)) or 0),
                 errors=int(status.get("errors", 0) or 0),
@@ -320,6 +324,7 @@ class AnalysisCoordinator:
         self.db_path = Path(db_path)
         self.tag = tag
         self.run_id = run_id
+        self.generation_id = f"{run_id}-{uuid.uuid4().hex[:12]}"
         self.config = config
         self.job_id = job_id
         self.project_root = Path(project_root)
@@ -881,6 +886,8 @@ class AnalysisCoordinator:
                 "--embedding_model", self.config.embedding_model,
                 "--run_id", self.run_id,
             ]
+        if step == "trend_pdf":
+            args += ["--generation_id", self.generation_id, "--run_id", self.run_id]
         env: dict[str, str] = {}
         if self.config.api_key:
             env[self.config.api_key_env] = self.config.api_key
@@ -966,7 +973,7 @@ class AnalysisCoordinator:
         tag_root.mkdir(parents=True, exist_ok=True)
         generations = tag_root / "generations"
         generations.mkdir(parents=True, exist_ok=True)
-        generation_id = f"{self.run_id}-{uuid.uuid4().hex[:12]}"
+        generation_id = self.generation_id
         temp_root = generations / f".{generation_id}.tmp"
         generation_root = generations / generation_id
         previous_root = latest_output_root(self.runtime_root, self.tag)

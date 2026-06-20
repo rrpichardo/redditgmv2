@@ -30,7 +30,7 @@ JOB_KINDS = frozenset(
 )
 
 # States that mean the job is done (no longer active)
-_TERMINAL_STATES = frozenset({"completed", "failed", "interrupted"})
+_TERMINAL_STATES = frozenset({"completed", "completed_with_warnings", "failed", "interrupted"})
 
 
 # ---------------------------------------------------------------------------

@@ -144,17 +144,22 @@ def test_trend_pdf_worker_reads_and_writes_output_root(tmp_path: Path) -> None:
     trends_dir.mkdir(parents=True)
     (trends_dir / "cluster_labels.json").write_text('{"0": "Issue"}', encoding="utf-8")
 
-    def _write_pdf(**kwargs) -> None:
-        kwargs["pdf_path"].write_bytes(b"pdf")
+    def _write_pdf(model, pdf_path) -> None:
+        pdf_path.write_bytes(b"pdf")
 
-    with patch("src.pdf_export.build_trend_briefing_pdf", side_effect=_write_pdf):
+    with patch("src.pdf_export.build_trend_report_pdf", side_effect=_write_pdf):
         run_trend_briefing_job(
             "gm", "pdf-1", runtime_root, output_root=output_root
         )
 
     expected = output_root / "gm" / "downloads" / "gm_trend_briefing.pdf"
+    markdown = output_root / "gm" / "downloads" / "gm_trend_briefing.md"
     assert expected.read_bytes() == b"pdf"
-    assert json.loads(status_path.read_text(encoding="utf-8"))["artifact_paths"] == [str(expected)]
+    assert markdown.read_text(encoding="utf-8").startswith("# GM Reddit")
+    assert json.loads(status_path.read_text(encoding="utf-8"))["artifact_paths"] == [
+        str(markdown),
+        str(expected),
+    ]
 
 
 def test_qa_worker_uses_output_root_but_keeps_status_in_runtime(tmp_path: Path) -> None:
@@ -162,6 +167,8 @@ def test_qa_worker_uses_output_root_but_keeps_status_in_runtime(tmp_path: Path) 
     output_root = tmp_path / "staging"
     status_path = _status(runtime_root, "gm", "qa-1", "faiss_qa")
     artifact = output_root / "gm" / "qa" / "index.faiss"
+    classified = tmp_path / "classified.csv"
+    classified.write_text("source_id\n1\n", encoding="utf-8")
 
     with (
         patch("scripts.faiss_qa_job.load_classified", return_value=pd.DataFrame([{"x": 1}])),
@@ -174,7 +181,7 @@ def test_qa_worker_uses_output_root_but_keeps_status_in_runtime(tmp_path: Path) 
             "gm",
             "qa-1",
             runtime_root,
-            tmp_path / "classified.csv",
+            classified,
             _provider(),
             output_root=output_root,
         )
