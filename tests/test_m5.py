@@ -267,7 +267,10 @@ def test_retry_preserves_immutable_attempt_history(runtime: Path) -> None:
     with _store(runtime) as store:
         before = store.get_attempts("run-1", "prepare")
 
-    with patch("app.start_job", return_value={"job_id": "retry-job"}):
+    with patch(
+        "app.start_job",
+        return_value={"job_id": "retry-job", "pid": os.getpid(), "state": "running"},
+    ):
         response = client.post(
             "/api/pipeline/retry",
             json={"tag": "alpha", "run_id": "run-1", "step": "prepare"},

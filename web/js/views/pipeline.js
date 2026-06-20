@@ -349,9 +349,9 @@ async function retryStep(stepName, btn) {
     if (!response.ok) {
       if (response.status === 409 && body.active_run_id) {
         state.pipelineRunId = body.active_run_id;
+        setNotice(`A run is already active (run ${body.active_run_id}).`, "warn");
         clearPoll();
         await loadPipelineRuns();
-        setNotice(`A run is already active (run ${body.active_run_id}).`, "warn");
         return;
       }
       throw new Error(body.detail || body.message || `Request failed with ${response.status}`);
