@@ -565,3 +565,76 @@ def test_publish_pointer_failure_keeps_previous_generation_visible(
     assert not (tag_root / "current").exists()
     for family in ("classified", "reports", "trends", "downloads", "qa"):
         assert (tag_root / family / "old.txt").read_text() == "old-generation"
+
+
+def test_retry_from_later_step_publishes_artifacts_from_prior_retries(tmp_path: Path) -> None:
+    """Retry from trends must publish briefing output that ran in an earlier retry.
+
+    Scenario that triggered the real bug (run 10995370):
+    1. Fresh run: classify, briefing, qa_index succeed; trends fails → run = "failed"
+       → _publish_latest never called → staging cleaned up.
+    2. Retry from trends: trends + trend_pdf succeed → all steps in DB are "completed"
+       → _publish_latest called — briefing NOT in staging (cleaned from run 1) →
+       previously raised FileNotFoundError, marking the whole run "failed".
+    Fix: _restore_prior_family_artifacts() re-populates staging from the attempts tree
+    before _publish_latest runs.
+    """
+    runtime_root = tmp_path / "runtime"
+    db_path = runtime_root / "runs.db"
+    run_id = "multi-retry-run"
+    tag = "gm"
+    _write_raw(runtime_root, tag, _raw_rows(3))
+
+    # Run 1: classify, briefing, qa_index succeed; trends fails → run = "failed"
+    # (_publish_latest is NOT called when the run fails)
+    def worker_trends_fails(step: str, coordinator: AnalysisCoordinator, paths) -> StepResult:
+        if step == "trends":
+            return StepResult(state="failed", warning="simulated transient failure")
+        return _successful_worker(step, coordinator, paths)
+
+    coordinator1 = AnalysisCoordinator(
+        runtime_root=runtime_root,
+        db_path=db_path,
+        tag=tag,
+        run_id=run_id,
+        config=_config(),
+        child_runner=worker_trends_fails,
+    )
+    result1 = coordinator1.run()
+    # trends failed → derive_run_state = "failed" → _publish_latest not called
+    assert result1["state"] == "failed"
+
+    # Briefing artifact must be in the immutable attempts tree even though publish didn't run
+    from src.run_store import attempt_paths as _attempt_paths, RunStore as _RS
+    with _RS(db_path) as store:
+        briefing_step = store.get_step(run_id, "briefing")
+    assert briefing_step["state"] == "completed"
+    briefing_attempt_artifact = (
+        _attempt_paths(runtime_root, tag, run_id, "briefing", briefing_step["attempt_no"]).artifacts_dir
+        / "reports" / "gm_reddit_synthesis_report.md"
+    )
+    assert briefing_attempt_artifact.exists(), "briefing artifact must be snapshotted to attempts tree"
+
+    # Run 2: retry from trends (steps_to_run = ["trends", "trend_pdf"])
+    # Staging starts empty; briefing is NOT in staging — without fix this raised FileNotFoundError
+    coordinator2 = AnalysisCoordinator(
+        runtime_root=runtime_root,
+        db_path=db_path,
+        tag=tag,
+        run_id=run_id,
+        config=_config(),
+        child_runner=_successful_worker,
+        steps_to_run=["trends", "trend_pdf"],
+    )
+    result2 = coordinator2.run()
+
+    # With fix: _restore_prior_family_artifacts() copies briefing + classify + qa from
+    # their attempt snapshots into staging, so _publish_latest succeeds.
+    assert result2["state"] == "completed", (
+        f"expected completed, got {result2['state']!r}: {result2.get('warning')}"
+    )
+    output_root = latest_output_root(runtime_root, tag)
+    assert (output_root / "reports" / "gm_reddit_synthesis_report.md").exists(), \
+        "briefing report must appear in the published generation"
+    assert (output_root / "trends" / "trend_signals.json").exists()
+    assert (output_root / "downloads").exists()

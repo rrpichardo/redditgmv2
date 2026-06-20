@@ -415,6 +415,7 @@ class AnalysisCoordinator:
             ended = time.time()
             warning = self._run_warning()
             if final_state in {"completed", "completed_with_warnings"}:
+                self._restore_prior_family_artifacts()
                 self._publish_latest()
             self.store.update_run(
                 self.run_id,
@@ -904,6 +905,34 @@ class AnalysisCoordinator:
             if row.get("warning")
         ]
         return "; ".join(dict.fromkeys(warnings))[:2000] if warnings else None
+
+    def _restore_prior_family_artifacts(self) -> None:
+        """Re-populate staging with artifact families that ran in an earlier retry invocation.
+
+        When retrying from a mid-pipeline step, only the retried steps write to staging.
+        Steps that succeeded in a prior retry have their staging cleaned up, so
+        _publish_latest() can't find them. This copies those family directories from
+        the immutable attempts tree back into staging before publication.
+        """
+        if self.steps_to_run is None:
+            return  # fresh run — staging already has everything
+        from src.run_store import attempt_paths as _attempt_paths
+        for family, producer_step in _FAMILY_PRODUCERS.items():
+            if producer_step in self.steps_to_run:
+                continue  # this step ran this time; staging already has it
+            dest = self.staging_tag_root / family
+            if dest.exists():
+                continue  # already present (shouldn't happen, but be safe)
+            step = self.store.get_step(self.run_id, producer_step)
+            if not step or step["state"] not in _SUCCESS_STATES or not step.get("attempt_no"):
+                continue  # step never succeeded; nothing to restore
+            paths = _attempt_paths(
+                self.runtime_root, self.tag, self.run_id, producer_step, int(step["attempt_no"])
+            )
+            source = paths.artifacts_dir / family
+            if source.exists():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(source, dest)
 
     def _publish_latest(self) -> None:
         tag_root = self.runtime_root / self.tag
