@@ -5,9 +5,19 @@ import { state, esc, $, fmt } from "../state.js";
 import { apiUrl, request } from "../api.js"; // apiUrl needed for raw fetch in analyzeData
 import { setNotice, setBusy } from "../components.js";
 import { loadRun } from "../app.js";
-import { collect } from "./collect.js";   // reuse existing collect action
+import {
+  collect,
+  createSubredditListDraft,
+  saveSubredditList,
+  selectSubredditList,
+} from "./collect.js";
 
 export function gatheringView() {
+  const selected = state.subredditLists.find((item) => item.id === state.selectedSubredditListId)
+    || state.subredditLists[0] || null;
+  const options = state.subredditLists.map((item) =>
+    `<option value="${esc(item.id)}" ${item.id === selected?.id ? "selected" : ""}>${esc(item.display_name)} · ${esc(item.type)}</option>`
+  ).join("");
   return `
     <div class="gathering-layout">
       <section class="panel">
@@ -23,19 +33,44 @@ export function gatheringView() {
           <button id="uploadBtn" class="button">Upload CSV</button>
         </div>
         <hr class="divider" />
-        <div class="form-grid">
-          <div class="control">
-            <label for="collectSource">Reddit source</label>
-            <select id="collectSource" name="source" autocomplete="off">
-              <option value="gm">GM vehicle list</option>
-              <option value="competitor">Competitor list</option>
-              <option value="custom">Custom list</option>
-            </select>
-            <small>Download fresh posts from Reddit into your workspace.</small>
+        <div class="subreddit-list-editor">
+          <div class="form-grid">
+            <div class="control wide">
+              <label for="subredditListSelect">Named subreddit list</label>
+              <select id="subredditListSelect" name="subreddit_list_id" autocomplete="off">
+                ${options || '<option value="">No saved lists yet</option>'}
+              </select>
+              <small>The selected version is snapshotted when collection starts.</small>
+            </div>
+            <div class="control">
+              <label for="subredditListName">Display name</label>
+              <input id="subredditListName" name="display_name" value="${esc(selected?.display_name || "")}" maxlength="80" />
+            </div>
+            <div class="control">
+              <label for="subredditListType">List type</label>
+              <select id="subredditListType" name="list_type">
+                ${["gm", "competitor", "custom"].map((type) => `<option value="${type}" ${selected?.type === type ? "selected" : ""}>${type}</option>`).join("")}
+              </select>
+            </div>
+            <div class="control wide">
+              <label for="subredditListValues">Subreddits</label>
+              <textarea id="subredditListValues" name="subreddits" rows="6" placeholder="Silverado&#10;GMC">${esc((selected?.subreddits || []).join("\n"))}</textarea>
+              <small>One subreddit per line. r/ prefixes and duplicates are normalized on save.</small>
+            </div>
           </div>
+          <div class="actions compact">
+            <button id="createSubredditListBtn" class="button secondary" type="button">Create new list</button>
+            <button id="saveSubredditListBtn" class="button" type="button">Save list</button>
+          </div>
+        </div>
+        <div class="form-grid" style="margin-top:1rem">
           <div class="control">
             <label for="listingLimit">Posts per subreddit</label>
             <input id="listingLimit" name="listing_limit" type="number" inputmode="numeric" autocomplete="off" min="1" max="500" value="100" />
+          </div>
+          <div class="control">
+            <label for="commentsLimit">Comments per post</label>
+            <input id="commentsLimit" name="comments_limit" type="number" inputmode="numeric" autocomplete="off" min="0" max="25" value="5" />
           </div>
         </div>
         <div class="actions">
@@ -125,6 +160,9 @@ export function bindGatheringEvents() {
   $("#uploadBtn")?.addEventListener("click", uploadFromGathering);
   // Collect button reuses the existing collect() action from collect.js.
   $("#collectBtn")?.addEventListener("click", collect);
+  $("#subredditListSelect")?.addEventListener("change", (event) => selectSubredditList(event.currentTarget.value));
+  $("#createSubredditListBtn")?.addEventListener("click", createSubredditListDraft);
+  $("#saveSubredditListBtn")?.addEventListener("click", saveSubredditList);
   // Analyze button fires the full pipeline.
   $("#analyzeBtn")?.addEventListener("click", analyzeData);
 }

@@ -30,6 +30,13 @@ from src.charts import build_chart_payload, build_detail_data
 # Bare import so test mocks (patch "app.start_job", "app.find_active_job") resolve correctly
 from src.jobs import find_active_job, job_path, read_status, start_job
 from src.run_store import RunStore, latest_output_root
+from src.subreddit_lists import (
+    ListConflictError,
+    ListNotFoundError,
+    ListValidationError,
+    SubredditListStore,
+    write_collection_snapshot,
+)
 from src.timeseries import build_timeseries
 from src.gm_insights import (
     MIN_CELL,
@@ -71,7 +78,18 @@ def resolve_runtime_root(root: Path, env: Mapping[str, str] | None = None) -> Pa
 
 RUNTIME = resolve_runtime_root(ROOT)
 WEB = ROOT / "web"
-LEGACY_ROOT = Path(os.getenv("REDDITGM_LEGACY_ROOT", "/Users/ricopichardo/Claude/redditgm"))
+SUBREDDIT_LISTS_ROOT = ROOT / "config" / "subreddit_lists"
+
+
+def resolve_legacy_root(env: Mapping[str, str] | None = None) -> Path | None:
+    values = os.environ if env is None else env
+    configured = values.get("REDDITGM_LEGACY_ROOT", "").strip()
+    if not configured:
+        configured = str(load_config().get("collection", {}).get("legacy_root", "")).strip()
+    return Path(configured).expanduser().resolve() if configured else None
+
+
+LEGACY_ROOT = resolve_legacy_root()
 DEFAULT_TAG = "gm_vehicle_on_demand"
 COLLECT_JOBS: dict[str, dict[str, Any]] = {}
 PIPELINE_CHILD_JOB_KINDS = ("classify", "briefing", "trend", "trend_briefing", "faiss_qa")
@@ -180,12 +198,23 @@ app.mount("/static", StaticFiles(directory=WEB), name="static")
 
 class CollectRequest(BaseModel):
     tag: str = DEFAULT_TAG
+    subreddit_list_id: str = ""
     source: str = "gm"
     subreddits: str = ""
     listing_limit: int = 100
     comments_limit: int = 5
     since_days: int = 0
     dry_run: bool = False
+
+
+class SubredditListCreateRequest(BaseModel):
+    display_name: str
+    type: str = "custom"
+    subreddits: list[str]
+
+
+class SubredditListUpdateRequest(SubredditListCreateRequest):
+    version: int
 
 
 class ClassifyRequest(BaseModel):
@@ -331,6 +360,10 @@ def read_subreddit_file(path: Path) -> list[str]:
     return subreddits
 
 
+def subreddit_store() -> SubredditListStore:
+    return SubredditListStore(SUBREDDIT_LISTS_ROOT, legacy_root=LEGACY_ROOT)
+
+
 def read_manifest(tag: str) -> list[dict[str, Any]]:
     path = manifest_path(tag)
     if not path.exists():
@@ -359,17 +392,22 @@ def tail_text(path: Path, max_chars: int = 12000) -> str:
 
 
 def source_subreddits_file(source: str, tag: str, subreddits: str = "") -> Path:
+    """Resolve legacy source names through the owned subreddit-list store."""
     key = source.lower().strip()
-    if key == "gm":
-        return LEGACY_ROOT / "config" / "gm_vehicle_subreddits.txt"
-    if key == "competitor":
-        return LEGACY_ROOT / "config" / "competitor_subreddits.txt"
-    if key == "custom":
-        path = run_dir(tag) / "config" / "subreddits.txt"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(subreddits.strip() + "\n", encoding="utf-8")
-        return path
-    raise HTTPException(status_code=400, detail="source must be gm, competitor, or custom.")
+    list_id = {"gm": "gm-default", "competitor": "competitor-default"}.get(key)
+    if not list_id:
+        raise HTTPException(
+            status_code=422,
+            detail="Custom collection now requires a saved subreddit_list_id.",
+        )
+    store = subreddit_store()
+    store.list_all()
+    try:
+        record = store.get(list_id)
+    except (ListNotFoundError, ListValidationError) as exc:
+        raise HTTPException(status_code=422, detail=f"Saved subreddit list {list_id!r} is unavailable.") from exc
+    _, text_path = write_collection_snapshot(record, run_dir(tag) / "config" / "legacy-source")
+    return text_path
 
 
 def source_download_entries(tag: str) -> list[dict[str, Any]]:
@@ -451,8 +489,10 @@ def collect_status_payload(tag: str, job_id: str = "") -> dict[str, Any]:
     manifest_start = int(job.get("manifest_start", 0)) if job else 0
     run_rows = rows[manifest_start:] if job and manifest_start <= len(rows) else rows
 
-    source_file = Path(job["subreddits_file"]) if job and job.get("subreddits_file") else LEGACY_ROOT / "config" / "gm_vehicle_subreddits.txt"
-    total_subreddits = int(job.get("total_subreddits", 0)) if job else len(read_subreddit_file(source_file))
+    source_file = Path(job["subreddits_file"]) if job and job.get("subreddits_file") else None
+    total_subreddits = int(job.get("total_subreddits", 0)) if job else (
+        len(read_subreddit_file(source_file)) if source_file else 0
+    )
     completed = len(run_rows)
     if total_subreddits:
         completed = min(completed, total_subreddits)
@@ -620,13 +660,14 @@ def run_snapshot(tag: str, filters: dict[str, Any] | None = None) -> dict[str, A
             "data": str(data_dir(tag)),
             "classified": str(classified_path(tag)),
             "report": str(report_path(tag)),
-            "collector": str(LEGACY_ROOT),
+            "collector": str(LEGACY_ROOT) if LEGACY_ROOT else "",
         },
         "status": {
             "has_source": not load_runtime_frame(data_dir(tag)).empty,
             "has_classified": classified_path(tag).exists(),
             "has_report": report_path(tag).exists(),
-            "legacy_collector_found": LEGACY_ROOT.exists(),
+            "legacy_collector_configured": LEGACY_ROOT is not None,
+            "legacy_collector_found": bool(LEGACY_ROOT and LEGACY_ROOT.exists()),
             "source_files": source_download_entries(tag),
         },
         "summary": payload,
@@ -722,6 +763,51 @@ async def patch_config_endpoint(request: Request) -> JSONResponse:
     if body:
         save_config(body)
     return JSONResponse({"ok": True})
+
+
+@app.get("/api/subreddit-lists")
+def list_subreddit_lists() -> JSONResponse:
+    return safe_json({"items": subreddit_store().list_all()})
+
+
+@app.get("/api/subreddit-lists/{list_id}")
+def get_subreddit_list(list_id: str) -> JSONResponse:
+    try:
+        return safe_json(subreddit_store().get(list_id))
+    except ListNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Subreddit list not found.") from exc
+    except ListValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/subreddit-lists", status_code=201)
+def create_subreddit_list(request: SubredditListCreateRequest) -> JSONResponse:
+    try:
+        record = subreddit_store().create(request.display_name, request.type, request.subreddits)
+    except ListConflictError as exc:
+        raise HTTPException(status_code=409, detail={"message": str(exc), "current": exc.current}) from exc
+    except ListValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return safe_json(record, status_code=201)
+
+
+@app.put("/api/subreddit-lists/{list_id}")
+def update_subreddit_list(list_id: str, request: SubredditListUpdateRequest) -> JSONResponse:
+    try:
+        record = subreddit_store().update(
+            list_id,
+            version=request.version,
+            display_name=request.display_name,
+            list_type=request.type,
+            subreddits=request.subreddits,
+        )
+    except ListNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Subreddit list not found.") from exc
+    except ListConflictError as exc:
+        raise HTTPException(status_code=409, detail={"message": str(exc), "current": exc.current}) from exc
+    except ListValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return safe_json(record)
 
 
 @app.get("/api/run")
@@ -828,8 +914,13 @@ def upload_csv(tag: str = DEFAULT_TAG, file: UploadFile = File(...)) -> JSONResp
 
 @app.post("/api/collect")
 def collect_data(request: CollectRequest) -> JSONResponse:
+    if LEGACY_ROOT is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Collector folder is not configured. Set REDDITGM_LEGACY_ROOT or collection.legacy_root.",
+        )
     if not LEGACY_ROOT.exists():
-        raise HTTPException(status_code=400, detail=f"Collector folder not found: {LEGACY_ROOT}")
+        raise HTTPException(status_code=400, detail=f"Configured collector folder not found: {LEGACY_ROOT}")
 
     tag = clean_tag(request.tag)
     # Reject collect if the tag has an active pipeline run to prevent data races
@@ -844,10 +935,24 @@ def collect_data(request: CollectRequest) -> JSONResponse:
         payload["started"] = False
         return safe_json(payload)
 
-    subreddits_file = source_subreddits_file(request.source, tag, request.subreddits)
-
-    if not subreddits_file.exists():
-        raise HTTPException(status_code=400, detail=f"Subreddit file not found: {subreddits_file}")
+    job_id = uuid.uuid4().hex
+    store = subreddit_store()
+    store.list_all()
+    list_id = request.subreddit_list_id.strip()
+    if not list_id:
+        list_id = {"gm": "gm-default", "competitor": "competitor-default"}.get(
+            request.source.lower().strip(), ""
+        )
+    if not list_id:
+        raise HTTPException(status_code=422, detail="Collection requires a saved subreddit_list_id.")
+    try:
+        selected_list = store.get(list_id)
+    except ListNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Selected subreddit list not found.") from exc
+    except ListValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    snapshot_root = run_dir(tag) / "collect" / job_id / "config"
+    _, subreddits_file = write_collection_snapshot(selected_list, snapshot_root)
 
     target_data = data_dir(tag).resolve()
     target_state = (run_dir(tag) / "state" / "seen_posts.json").resolve()
@@ -888,7 +993,6 @@ def collect_data(request: CollectRequest) -> JSONResponse:
     log_path = collect_log_path(tag)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_start = len(read_manifest(tag))
-    job_id = uuid.uuid4().hex
     subreddits = read_subreddit_file(subreddits_file)
     header = [
         f"Collector job {job_id} started at {time.strftime('%Y-%m-%d %H:%M:%S')}",
@@ -922,6 +1026,8 @@ def collect_data(request: CollectRequest) -> JSONResponse:
         "manifest_start": manifest_start,
         "total_subreddits": len(subreddits),
         "subreddits_file": str(subreddits_file.resolve()),
+        "subreddit_list_id": selected_list["id"],
+        "subreddit_list_version": selected_list["version"],
         "cmd": cmd,
     }
     payload = collect_status_payload(tag, job_id)
@@ -1814,6 +1920,8 @@ def health() -> dict[str, Any]:
     return {
         "ok": True,
         "server": "fastapi",
-        "legacy_collector_found": LEGACY_ROOT.exists(),
+        "legacy_collector_configured": LEGACY_ROOT is not None,
+        "legacy_collector_found": bool(LEGACY_ROOT and LEGACY_ROOT.exists()),
+        "legacy_collector_root": str(LEGACY_ROOT) if LEGACY_ROOT else "",
         "runtime": str(RUNTIME),
     }

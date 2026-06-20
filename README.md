@@ -31,13 +31,9 @@ You can also enter a temporary key override in the app sidebar.
 
 ## Collector bridge
 
-By default the app calls:
-
-```text
-/Users/ricopichardo/Claude/redditgm/collect_incremental.py
-```
-
-Set `REDDITGM_LEGACY_ROOT` to point somewhere else.
+The collector executable remains an explicit external dependency. Configure its repository with
+`REDDITGM_LEGACY_ROOT` or `collection.legacy_root` in `config.json`. If neither is configured,
+collection is disabled and `/api/health` reports that state; there is no machine-specific fallback.
 
 The web app intentionally does not expose a `since_days` lookback control. Collection depth comes
 from accumulated duplicate-safe runs. The backend still accepts `since_days` only for legacy

@@ -773,6 +773,11 @@ def complaint_summary(df: pd.DataFrame) -> pd.DataFrame:
 def complaint_chart_presentation(df: pd.DataFrame) -> dict[str, Any]:
     """Return complaint rows and record counts for chart presentation."""
     analyzed = analyzed_frame(df)
+    if analyzed.empty or "complaint" not in analyzed:
+        return {
+            "items": [],
+            "counts": {"total_complaints": 0, "applicable": 0, "excluded": 0},
+        }
     complaints = analyzed[analyzed["complaint"] == 1]
     sentinels = {"", "not_applicable", "none", "unknown", "nan", "null", "skipped", "error"}
     counts: Counter[str] = Counter()

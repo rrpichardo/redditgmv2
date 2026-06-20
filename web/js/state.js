@@ -41,6 +41,8 @@ export const state = {
     total_pages: 0,
     score_unit: "reddit_score",
   },
+  subredditLists: [],
+  selectedSubredditListId: "",
 
   // Pipeline tracking (M2-frontend implements full UI)
   pipelineRunId: null,

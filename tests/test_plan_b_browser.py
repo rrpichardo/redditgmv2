@@ -156,3 +156,75 @@ def test_evidence_overflow_keyboard_and_server_page_navigation(live_server, brow
     page.click("#evidenceNextBtn")
     page.wait_for_function("() => document.querySelector('.evidence-pager-info')?.textContent.includes('Page 2 of 2')")
     assert "Page two" in page.inner_text("#viewRoot")
+
+
+def test_collect_list_editor_creates_and_uses_named_list(live_server, browser_page) -> None:
+    page = browser_page
+    records = [
+        {
+            "id": "list_11111111111111111111111111111111",
+            "display_name": "Existing list",
+            "type": "custom",
+            "subreddits": ["silverado"],
+            "version": 1,
+            "created_at": 1,
+            "updated_at": 1,
+        }
+    ]
+    saved_payload: dict = {}
+    collect_payload: dict = {}
+
+    def list_route(route) -> None:
+        if route.request.method == "GET":
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({"items": records}))
+            return
+        payload = route.request.post_data_json
+        saved_payload.update(payload)
+        created = {
+            "id": "list_22222222222222222222222222222222",
+            "display_name": payload["display_name"],
+            "type": payload["type"],
+            "subreddits": [value for value in payload["subreddits"] if value],
+            "version": 1,
+            "created_at": 2,
+            "updated_at": 2,
+        }
+        records.append(created)
+        route.fulfill(status=201, content_type="application/json", body=json.dumps(created))
+
+    def collect_route(route) -> None:
+        collect_payload.update(route.request.post_data_json)
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "ok": True,
+                "tag": live_server.tag,
+                "job_id": "fixture-collect",
+                "status": "completed",
+                "completed_subreddits": 2,
+                "total_subreddits": 2,
+                "log": "complete",
+                "started": True,
+            }),
+        )
+
+    page.route("**/api/subreddit-lists*", list_route)
+    page.route("**/api/collect", collect_route)
+    _load_browser_with_data(page, live_server)
+    page.click('.tab[data-view="gathering"]')
+
+    page.click("#createSubredditListBtn")
+    page.fill("#subredditListName", "Launch watchlist")
+    page.select_option("#subredditListType", "custom")
+    page.fill("#subredditListValues", "Silverado\nGMC")
+    page.click("#saveSubredditListBtn")
+    page.wait_for_function("() => document.querySelector('#subredditListSelect')?.value.endsWith('22222222222222222222222222222222')")
+
+    assert saved_payload["display_name"] == "Launch watchlist"
+    assert saved_payload["subreddits"] == ["Silverado", "GMC"]
+
+    page.click("#collectBtn")
+    page.wait_for_function("() => document.querySelector('#statusBar')?.textContent.includes('Collector completed')")
+    assert collect_payload["subreddit_list_id"] == "list_22222222222222222222222222222222"
+    assert "since_days" not in collect_payload

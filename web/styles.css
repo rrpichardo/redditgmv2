@@ -788,6 +788,16 @@ h3 { font-size: 0.875rem; font-weight: 700; }
 }
 .form-grid .wide { grid-column: span 2; }
 
+.subreddit-list-editor {
+  padding: 0.9rem;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--blue);
+  border-radius: var(--radius-md);
+  background: linear-gradient(135deg, var(--surface-2), var(--surface));
+}
+.subreddit-list-editor textarea { min-height: 8rem; resize: vertical; }
+.actions.compact { margin-top: 0.65rem; }
+
 .field-row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-top: 0.85rem; }
 .field-row.flush { margin-top: 0; margin-bottom: 0.65rem; }
 

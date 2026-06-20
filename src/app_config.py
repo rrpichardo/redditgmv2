@@ -23,6 +23,7 @@ DEFAULTS: dict[str, Any] = {
     },
     "collection": {
         "default_tag": "gm_vehicle_on_demand",
+        "legacy_root": "",
         "listing_limit": 100,
         "comments_limit": 5,
     },

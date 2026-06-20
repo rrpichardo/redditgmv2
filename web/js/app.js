@@ -19,11 +19,12 @@ export async function loadRun({ silent = false } = {}) {
   if (!silent) setNotice("Loading run…");
   try {
     const params = buildFilterParams();
-    const [runResult, trendsResult, timeseriesResult, evidenceResult] = await Promise.allSettled([
+    const [runResult, trendsResult, timeseriesResult, evidenceResult, listsResult] = await Promise.allSettled([
       request(apiUrl("/api/run", { tag: state.tag, ...params })),
       request(apiUrl("/api/trends", { tag: state.tag })),
       request(apiUrl("/api/trends/timeseries", { tag: state.tag })),
       loadEvidence(),
+      request(apiUrl("/api/subreddit-lists")),
     ]);
 
     if (runResult.status === "rejected") throw runResult.reason;
@@ -33,6 +34,10 @@ export async function loadRun({ silent = false } = {}) {
     state.evidence = evidenceResult.status === "fulfilled"
       ? evidenceResult.value
       : { ...state.evidence, items: [], total_items: 0, total_pages: 0 };
+    state.subredditLists = listsResult.status === "fulfilled" ? listsResult.value.items || [] : [];
+    if (!state.subredditLists.some((item) => item.id === state.selectedSubredditListId)) {
+      state.selectedSubredditListId = state.subredditLists[0]?.id || "";
+    }
 
     const collectStatus = await request(
       apiUrl("/api/collect/status", { tag: state.tag })

@@ -24,7 +24,14 @@ export async function request(path, options = {}) {
     body = { detail: text };
   }
   if (!response.ok) {
-    throw new Error(body.detail || `Request failed with ${response.status}`);
+    const detail = body.detail;
+    const message = typeof detail === "string"
+      ? detail
+      : detail?.message || `Request failed with ${response.status}`;
+    const error = new Error(message);
+    error.status = response.status;
+    error.detail = detail;
+    throw error;
   }
   return body;
 }
