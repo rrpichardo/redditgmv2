@@ -20,6 +20,11 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import pandas as pd
 
+from src.app_config import (
+    DEFAULT_CLUSTER_LABEL_PROMPT,
+    cluster_prompt_provenance,
+    write_cluster_prompt_snapshot,
+)
 from src.gm_insights import (
     EXPECTED_KEYS,
     ensure_label_columns,
@@ -70,11 +75,13 @@ class AnalyzeConfig:
     api_key: str = ""
     n_clusters: int = 10
     embedding_model: str = "text-embedding-3-small"
+    cluster_prompt: str = DEFAULT_CLUSTER_LABEL_PROMPT
 
     def effective_api_key(self) -> str:
         return self.api_key or os.getenv(self.api_key_env, "")
 
     def persisted(self) -> dict[str, object]:
+        prompt = cluster_prompt_provenance({"prompts": {"cluster_label": self.cluster_prompt}})
         return {
             "provider": self.provider,
             "model": self.model,
@@ -82,6 +89,7 @@ class AnalyzeConfig:
             "api_key_env": self.api_key_env,
             "n_clusters": self.n_clusters,
             "embedding_model": self.embedding_model,
+            "cluster_prompt_sha256": prompt["sha256"],
         }
 
 
@@ -324,6 +332,12 @@ class AnalysisCoordinator:
         self.strict_adoption = strict_adoption
         # When set, only these steps will be executed; others are skipped (state left untouched)
         self.steps_to_run: list[str] | None = steps_to_run
+        self.prompt_snapshot_path = (
+            self.runtime_root / self.tag / "runs" / self.run_id / "config" / "cluster_prompt.json"
+        )
+        self.prompt_provenance = cluster_prompt_provenance(
+            {"prompts": {"cluster_label": self.config.cluster_prompt}}
+        )
 
     @property
     def store(self) -> RunStore:
@@ -341,6 +355,11 @@ class AnalysisCoordinator:
 
     def run(self) -> dict[str, object]:
         self.runtime_root.mkdir(parents=True, exist_ok=True)
+        if self.prompt_snapshot_path.exists():
+            import json
+            self.prompt_provenance = json.loads(self.prompt_snapshot_path.read_text(encoding="utf-8"))
+        else:
+            write_cluster_prompt_snapshot(self.prompt_snapshot_path, self.prompt_provenance)
         self._store = RunStore(self.db_path)
         try:
             if self.strict_adoption:
@@ -682,7 +701,11 @@ class AnalysisCoordinator:
             self.run_id,
             step,
             log_path=str(paths.log_path),
-            metadata={"run_id": self.run_id, "step": step},
+            metadata={
+                "run_id": self.run_id,
+                "step": step,
+                "cluster_prompt_sha256": self.prompt_provenance["sha256"],
+            },
         )
         return int(attempt["attempt_no"]), paths
 
@@ -851,6 +874,7 @@ class AnalysisCoordinator:
             args += [
                 "--n_clusters", str(self.config.n_clusters),
                 "--embedding_model", self.config.embedding_model,
+                "--cluster_prompt_path", str(self.prompt_snapshot_path),
             ]
         if step == "qa_index":
             args += ["--embedding_model", self.config.embedding_model]
@@ -998,6 +1022,7 @@ def main() -> None:
     parser.add_argument("--api_key_env", default="OPENROUTER_API_KEY")
     parser.add_argument("--n_clusters", type=int, default=10)
     parser.add_argument("--embedding_model", default="text-embedding-3-small")
+    parser.add_argument("--cluster_prompt_path", default="")
     # When set, only execute this step and its transitive dependents; all other steps are skipped
     parser.add_argument("--retry-from-step", default="", dest="retry_from_step")
     parser.add_argument("--strict-adoption", action="store_true")
@@ -1010,6 +1035,11 @@ def main() -> None:
     steps_to_run: list[str] | None = None
     if args.retry_from_step:
         steps_to_run = retry_steps(args.retry_from_step)
+
+    cluster_prompt = DEFAULT_CLUSTER_LABEL_PROMPT
+    if args.cluster_prompt_path:
+        import json
+        cluster_prompt = str(json.loads(Path(args.cluster_prompt_path).read_text(encoding="utf-8"))["prompt"])
 
     coordinator = AnalysisCoordinator(
         runtime_root=runtime_root,
@@ -1024,6 +1054,7 @@ def main() -> None:
             api_key_env=args.api_key_env,
             n_clusters=max(2, args.n_clusters),
             embedding_model=args.embedding_model,
+            cluster_prompt=cluster_prompt,
         ),
         steps_to_run=steps_to_run,
         strict_adoption=args.strict_adoption,

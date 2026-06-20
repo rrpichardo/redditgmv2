@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 import traceback
@@ -27,6 +28,7 @@ def run_trend_job(
     n_clusters: int = 10,
     embedding_model: str = "text-embedding-3-small",
     output_root: Path | None = None,
+    cluster_prompt: str | None = None,
 ) -> None:
     """Load classified data, run the clustering pipeline, and write job status."""
     status_path = job_path(runtime_root, tag, job_id)
@@ -52,6 +54,7 @@ def run_trend_job(
             n_clusters=n_clusters,
             embedding_model=embedding_model,
             heartbeat_cb=heartbeat,
+            cluster_prompt=cluster_prompt,
         )
 
         # Phase 5: compute trend signals (velocity + z-score) — non-fatal
@@ -101,6 +104,7 @@ def main() -> None:
     # Data
     parser.add_argument("--classified_path", required=True)
     parser.add_argument("--output_root", default="")
+    parser.add_argument("--cluster_prompt_path", default="")
 
     # Clustering
     parser.add_argument("--n_clusters", type=int, default=10)
@@ -113,6 +117,11 @@ def main() -> None:
     parser.add_argument("--api_key_env", default="OPENROUTER_API_KEY")
 
     args = parser.parse_args()
+
+    cluster_prompt = None
+    if args.cluster_prompt_path:
+        snapshot = json.loads(Path(args.cluster_prompt_path).read_text(encoding="utf-8"))
+        cluster_prompt = str(snapshot["prompt"])
 
     provider = ProviderConfig(
         provider=args.provider,
@@ -131,6 +140,7 @@ def main() -> None:
         n_clusters=args.n_clusters,
         embedding_model=args.embedding_model,
         output_root=Path(args.output_root) if args.output_root else None,
+        cluster_prompt=cluster_prompt,
     )
 
 

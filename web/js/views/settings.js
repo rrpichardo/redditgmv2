@@ -129,6 +129,17 @@ export function settingsView() {
           <textarea id="cfg-prompt-synthesis" name="prompt_synthesis"
             rows="10">${esc(pr.synthesis || "")}</textarea>
         </div>
+        <div class="control" style="margin-top:1rem">
+          <label for="cfg-prompt-cluster">Cluster-labeling prompt</label>
+          <textarea id="cfg-prompt-cluster" name="prompt_cluster_label"
+            rows="18">${esc(pr.cluster_label || "")}</textarea>
+          <small>Required placeholders and the JSON output contract are checked before save.</small>
+        </div>
+        <div class="actions compact">
+          <button id="validateClusterPromptBtn" class="button" type="button">Validate prompt</button>
+          <button id="resetClusterPromptBtn" class="button secondary" type="button">Reset to default</button>
+          <span id="clusterPromptValidation" class="config-save-status" aria-live="polite"></span>
+        </div>
       </section>
 
       <div class="config-actions">
@@ -161,6 +172,36 @@ export async function loadConfig() {
 // ---------------------------------------------------------------------------
 export function bindSettingsEvents() {
   document.getElementById("saveConfigBtn")?.addEventListener("click", saveConfig);
+  document.getElementById("validateClusterPromptBtn")?.addEventListener("click", validateClusterPrompt);
+  document.getElementById("resetClusterPromptBtn")?.addEventListener("click", resetClusterPrompt);
+}
+
+export async function validateClusterPrompt() {
+  const prompt = document.getElementById("cfg-prompt-cluster")?.value ?? "";
+  const status = document.getElementById("clusterPromptValidation");
+  try {
+    const result = await request("/api/config/cluster-prompt/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt }),
+    });
+    if (status) {
+      status.textContent = result.valid ? "Prompt is valid." : result.errors.join(" ");
+      status.classList.toggle("error", !result.valid);
+    }
+    return result;
+  } catch (error) {
+    if (status) status.textContent = `Validation failed: ${error.message}`;
+    return { valid: false, errors: [error.message] };
+  }
+}
+
+export async function resetClusterPrompt() {
+  const result = await request("/api/config/cluster-prompt/reset", { method: "POST" });
+  const textarea = document.getElementById("cfg-prompt-cluster");
+  if (textarea) textarea.value = result.prompt;
+  await loadConfig();
+  await validateClusterPrompt();
 }
 
 async function saveConfig() {
@@ -182,6 +223,7 @@ async function saveConfig() {
   const qaK          = parseInt(document.getElementById("cfg-qa-k")?.value, 10);
   const promptClassify = document.getElementById("cfg-prompt-classify")?.value ?? "";
   const promptSynth    = document.getElementById("cfg-prompt-synthesis")?.value ?? "";
+  const promptCluster  = document.getElementById("cfg-prompt-cluster")?.value ?? "";
 
   const body = {
     provider: {
@@ -203,11 +245,17 @@ async function saveConfig() {
     prompts: {
       classification: promptClassify,
       synthesis: promptSynth,
+      cluster_label: promptCluster,
     },
   };
   if (apiKey) body.api_key = apiKey;
 
   try {
+    const validation = await validateClusterPrompt();
+    if (!validation.valid) {
+      if (status) status.textContent = "Cluster prompt is invalid; settings were not saved.";
+      return;
+    }
     await request(apiUrl("/api/config"), { method: "PATCH", body: JSON.stringify(body),
       headers: { "Content-Type": "application/json" } });
     // Update state so in-flight pipeline calls use new values

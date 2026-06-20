@@ -228,3 +228,43 @@ def test_collect_list_editor_creates_and_uses_named_list(live_server, browser_pa
     page.wait_for_function("() => document.querySelector('#statusBar')?.textContent.includes('Collector completed')")
     assert collect_payload["subreddit_list_id"] == "list_22222222222222222222222222222222"
     assert "since_days" not in collect_payload
+
+
+def test_cluster_prompt_preview_and_reset_are_interactive(live_server, browser_page) -> None:
+    page = browser_page
+    default_prompt = "Default prompt with every required placeholder and JSON contract"
+
+    def validate_route(route) -> None:
+        prompt = route.request.post_data_json["prompt"]
+        valid = prompt == default_prompt
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "valid": valid,
+                "missing_placeholders": [] if valid else ["cluster_size"],
+                "unknown_placeholders": [],
+                "missing_output_keys": [] if valid else ["short_label"],
+                "errors": [] if valid else ["Missing required placeholders: cluster_size"],
+            }),
+        )
+
+    page.route("**/api/config/cluster-prompt/validate", validate_route)
+    page.route(
+        "**/api/config/cluster-prompt/reset",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"prompt": default_prompt, "validation": {"valid": True}}),
+        ),
+    )
+    _load_browser_with_data(page, live_server)
+    page.click('.tab[data-view="settings"]')
+
+    page.fill("#cfg-prompt-cluster", "broken")
+    page.click("#validateClusterPromptBtn")
+    page.wait_for_function("() => document.querySelector('#clusterPromptValidation')?.textContent.includes('cluster_size')")
+
+    page.click("#resetClusterPromptBtn")
+    page.wait_for_function(f"() => document.querySelector('#cfg-prompt-cluster')?.value === {json.dumps(default_prompt)}")
+    assert page.inner_text("#clusterPromptValidation") == "Prompt is valid."

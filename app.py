@@ -24,7 +24,16 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from scripts.analyze_run import STEP_ORDER, retry_steps
-from src.app_config import load_api_key, load_config, save_api_key, save_config
+from src.app_config import (
+    cluster_prompt_provenance,
+    load_api_key,
+    load_config,
+    reset_cluster_label_prompt,
+    save_api_key,
+    save_config,
+    validate_cluster_prompt,
+    write_cluster_prompt_snapshot,
+)
 from src.briefing import write_briefing
 from src.charts import build_chart_payload, build_detail_data
 # Bare import so test mocks (patch "app.start_job", "app.find_active_job") resolve correctly
@@ -215,6 +224,10 @@ class SubredditListCreateRequest(BaseModel):
 
 class SubredditListUpdateRequest(SubredditListCreateRequest):
     version: int
+
+
+class ClusterPromptValidationRequest(BaseModel):
+    prompt: str
 
 
 class ClassifyRequest(BaseModel):
@@ -758,11 +771,27 @@ def get_config_endpoint() -> JSONResponse:
 async def patch_config_endpoint(request: Request) -> JSONResponse:
     body = await request.json()
     api_key = body.pop("api_key", None)
+    cluster_prompt = body.get("prompts", {}).get("cluster_label") if isinstance(body.get("prompts"), dict) else None
+    if cluster_prompt is not None:
+        validation = validate_cluster_prompt(str(cluster_prompt))
+        if not validation["valid"]:
+            raise HTTPException(status_code=422, detail=validation)
     if api_key is not None:
         save_api_key(api_key)
     if body:
         save_config(body)
     return JSONResponse({"ok": True})
+
+
+@app.post("/api/config/cluster-prompt/validate")
+def validate_cluster_prompt_endpoint(request: ClusterPromptValidationRequest) -> JSONResponse:
+    return safe_json(validate_cluster_prompt(request.prompt))
+
+
+@app.post("/api/config/cluster-prompt/reset")
+def reset_cluster_prompt_endpoint() -> JSONResponse:
+    prompt = reset_cluster_label_prompt()
+    return safe_json({"prompt": prompt, "validation": validate_cluster_prompt(prompt)})
 
 
 @app.get("/api/subreddit-lists")
@@ -1625,6 +1654,8 @@ def analyze(request: AnalyzeRequest) -> JSONResponse:
     owner_id = uuid.uuid4().hex
     pcfg = provider_config(request.provider, request.model, request.api_key)
     n_clusters = max(2, request.n_clusters)
+    prompt_provenance = cluster_prompt_provenance(load_config())
+    prompt_snapshot_path = RUNTIME / tag / "runs" / run_id / "config" / "cluster_prompt.json"
     run_config = {
         "provider": pcfg.provider,
         "model": pcfg.model,
@@ -1632,6 +1663,7 @@ def analyze(request: AnalyzeRequest) -> JSONResponse:
         "api_key_env": pcfg.api_key_env,
         "n_clusters": n_clusters,
         "embedding_model": "text-embedding-3-small",
+        "cluster_prompt_sha256": prompt_provenance["sha256"],
     }
 
     with RunStore(RUNTIME / "runs.db") as store:
@@ -1645,6 +1677,13 @@ def analyze(request: AnalyzeRequest) -> JSONResponse:
         )
     if not reservation.acquired:
         return run_active_response(tag, reservation.active_run_id or "unknown")
+
+    try:
+        write_cluster_prompt_snapshot(prompt_snapshot_path, prompt_provenance)
+    except Exception as exc:
+        with RunStore(RUNTIME / "runs.db") as store:
+            store.fail_reserved_run(tag, run_id=run_id, owner_id=owner_id, warning=str(exc))
+        raise HTTPException(status_code=500, detail=f"Prompt snapshot failed: {exc}") from exc
 
     # API key goes into the subprocess env, never on the CLI
     env: dict[str, str] = {}
@@ -1661,6 +1700,7 @@ def analyze(request: AnalyzeRequest) -> JSONResponse:
         "--model", pcfg.model,
         "--api_key_env", pcfg.api_key_env,
         "--n_clusters", str(n_clusters),
+        "--cluster_prompt_path", str(prompt_snapshot_path),
         "--strict-adoption",
     ]
     try:
@@ -1871,6 +1911,10 @@ def pipeline_retry(request: PipelineRetryRequest) -> JSONResponse:
     if pcfg.api_key:
         env[pcfg.api_key_env] = pcfg.api_key
 
+    prompt_snapshot_path = RUNTIME / tag / "runs" / request.run_id / "config" / "cluster_prompt.json"
+    if not prompt_snapshot_path.exists():
+        write_cluster_prompt_snapshot(prompt_snapshot_path, cluster_prompt_provenance(load_config()))
+
     extra_args = [
         "--tag", tag,
         "--runtime_root", str(RUNTIME),
@@ -1881,6 +1925,7 @@ def pipeline_retry(request: PipelineRetryRequest) -> JSONResponse:
         "--model", pcfg.model,
         "--api_key_env", pcfg.api_key_env,
         "--n_clusters", str(max(2, run_config.get("n_clusters", 10))),
+        "--cluster_prompt_path", str(prompt_snapshot_path),
         "--retry-from-step", request.step,
         "--strict-adoption",
     ]

@@ -37,6 +37,7 @@ except ImportError:
     HAS_SKLEARN = False
 
 from src.gm_insights import ProviderConfig, analyzed_frame
+from src.app_config import DEFAULT_CLUSTER_LABEL_PROMPT, get_cluster_label_prompt
 from src.run_store import latest_output_root
 
 # ---------------------------------------------------------------------------
@@ -55,34 +56,7 @@ CLUSTER_LABEL_SYSTEM = (
     "Return valid JSON only — no markdown fences, no text outside the JSON object."
 )
 
-CLUSTER_LABEL_PROMPT = """\
-Analyze this cluster of {cluster_size} Reddit comments about General Motors vehicles.
-
-Cluster metadata:
-- Sentiment mix: {sentiment_mix}
-- Severity mix: {severity_mix}
-- Top vehicles mentioned: {top_vehicles}
-- Top complaint categories: {top_categories}
-
-Most characteristic comments (centroid-nearest — these define the cluster):
-{centroid_reps}
-
-Highest-engagement comments:
-{engagement_reps}
-
-Most recent comments:
-{recent_reps}
-
-Respond with a JSON object:
-{{
-  "short_label": "<3-6 word theme>",
-  "detailed_label": "<1-2 sentence description of this cluster>",
-  "theme_type": "<complaint | delight | mixed | comparison | question | other>",
-  "confidence": "<high | medium | low>",
-  "confidence_score": <0.0 to 1.0>,
-  "rationale": "<1-2 sentences: why this label fits these examples>",
-  "label_risk": "<low | medium | high — high means examples are heterogeneous or the theme is ambiguous>"
-}}"""
+CLUSTER_LABEL_PROMPT = DEFAULT_CLUSTER_LABEL_PROMPT
 
 
 # ---------------------------------------------------------------------------
@@ -352,14 +326,18 @@ def build_cluster_context(
 # LLM cluster labeling
 # ---------------------------------------------------------------------------
 
-def label_cluster_with_llm(context: dict[str, Any], provider: ProviderConfig) -> dict[str, Any]:
+def label_cluster_with_llm(
+    context: dict[str, Any],
+    provider: ProviderConfig,
+    prompt_template: str | None = None,
+) -> dict[str, Any]:
     """Call the LLM to generate a structured cluster label."""
     from openai import OpenAI
 
     api_key = provider.api_key or os.getenv(provider.api_key_env, "")
     client = OpenAI(api_key=api_key, base_url=provider.base_url)
 
-    prompt = CLUSTER_LABEL_PROMPT.format(
+    prompt = (prompt_template or get_cluster_label_prompt()).format(
         cluster_size=context["cluster_size"],
         sentiment_mix=context["sentiment_mix"],
         severity_mix=context["severity_mix"],
@@ -486,6 +464,7 @@ def run_clustering(
     n_clusters: int = 10,
     embedding_model: str = EMBEDDING_MODEL,
     heartbeat_cb: Callable[[int, int], None] | None = None,
+    cluster_prompt: str | None = None,
 ) -> dict[str, Any]:
     """Run the full Phase 4 clustering pipeline and save all artifacts.
 
@@ -565,7 +544,11 @@ def run_clustering(
         coh = cluster_coherence(member_positions, embeddings)
 
         # LLM label
-        raw_label = label_cluster_with_llm(ctx, provider)
+        raw_label = (
+            label_cluster_with_llm(ctx, provider, cluster_prompt)
+            if cluster_prompt is not None
+            else label_cluster_with_llm(ctx, provider)
+        )
 
         # Adjust overconfident model labels
         final_label = _deterministic_confidence(raw_label, ctx, coh)
