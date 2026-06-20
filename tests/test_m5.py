@@ -555,6 +555,129 @@ def test_pipeline_status_badges_use_icon_and_text_without_injected_palette(
     assert page.locator("#pipeline-styles").count() == 0
 
 
+def test_pipeline_status_recovers_and_clears_stale_notice(
+    live_server, browser_page
+) -> None:
+    page = browser_page
+    _load_browser_with_data(page, live_server)
+    page.route(
+        "**/api/pipeline/runs*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                [{"run_id": "run-1", "state": "running", "started_at": 1}]
+            ),
+        ),
+    )
+    calls = {"status": 0}
+
+    def status_route(route) -> None:
+        calls["status"] += 1
+        if calls["status"] == 1:
+            route.fulfill(
+                status=404,
+                content_type="application/json",
+                body=json.dumps({"detail": "Run 'run-1' not found."}),
+            )
+            return
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "run_id": "run-1",
+                    "tag": "fixture",
+                    "state": "running",
+                    "started_at": 1,
+                    "steps": [],
+                }
+            ),
+        )
+
+    page.route("**/api/pipeline/status*", status_route)
+    page.click('.tab[data-view="pipeline"]')
+    page.wait_for_selector("#statusBar .notice.error")
+    assert "Run 'run-1' not found" in page.inner_text("#statusBar")
+
+    page.click("#pipelineRefreshBtn")
+    page.wait_for_function("() => document.querySelector('#statusBar')?.textContent === ''")
+    assert calls["status"] >= 2
+
+
+def test_pipeline_retry_conflict_selects_active_run(live_server, browser_page) -> None:
+    page = browser_page
+    _load_browser_with_data(page, live_server)
+    page.route(
+        "**/api/pipeline/runs*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                [
+                    {"run_id": "run-1", "state": "failed", "started_at": 1},
+                    {"run_id": "run-2", "state": "running", "started_at": 2},
+                ]
+            ),
+        ),
+    )
+
+    def status_route(route) -> None:
+        run_id = "run-2" if "run_id=run-2" in route.request.url else "run-1"
+        state = "running" if run_id == "run-2" else "failed"
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "run_id": run_id,
+                    "tag": "fixture",
+                    "state": state,
+                    "started_at": 2 if run_id == "run-2" else 1,
+                    "steps": [
+                        {
+                            "name": "trend_pdf",
+                            "state": state,
+                            "processed": 0,
+                            "total": 0,
+                            "errors": 0,
+                            "error_rate": 0,
+                            "warning": "PDF failed." if state == "failed" else None,
+                            "artifacts": [],
+                            "log_available": False,
+                        }
+                    ],
+                }
+            ),
+        )
+
+    page.route("**/api/pipeline/status*", status_route)
+    page.route(
+        "**/api/pipeline/retry",
+        lambda route: route.fulfill(
+            status=409,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "error": "run_active",
+                    "message": "Tag 'fixture' has an active run: run-2",
+                    "active_run_id": "run-2",
+                }
+            ),
+        ),
+    )
+
+    page.click('.tab[data-view="pipeline"]')
+    page.wait_for_selector('.retry-btn[data-step="trend_pdf"]')
+    page.click('.retry-btn[data-step="trend_pdf"]')
+    page.wait_for_function(
+        "() => document.querySelector('#pipelineRunSelect')?.value === 'run-2'"
+    )
+
+    assert "run run-2" in page.inner_text("#statusBar")
+    assert "Request failed with 409" not in page.inner_text("#statusBar")
+
+
 def test_view_change_uses_short_transform_opacity_animation(live_server, browser_page) -> None:
     page = browser_page
     _load_browser_with_data(page, live_server)
