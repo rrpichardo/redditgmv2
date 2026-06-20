@@ -35,6 +35,29 @@ except ImportError:  # pragma: no cover
     _HAS_FPDF = False
 
 
+def _register_dejavu_fonts(pdf: "FPDF") -> str:
+    """Register DejaVu Sans (shipped with Matplotlib) for Unicode support.
+
+    Returns the font family name to pass to set_font().
+    Raises RuntimeError if Matplotlib is not installed or fonts are missing.
+    """
+    if not _HAS_MATPLOTLIB:
+        raise RuntimeError("matplotlib is required for Unicode PDF export")
+    from matplotlib.font_manager import FontProperties, findfont
+
+    styles = {
+        "": FontProperties(family="DejaVu Sans", style="normal", weight="normal"),
+        "B": FontProperties(family="DejaVu Sans", style="normal", weight="bold"),
+        "I": FontProperties(family="DejaVu Sans", style="italic", weight="normal"),
+    }
+    for style, props in styles.items():
+        path = findfont(props, fallback_to_default=False)
+        if not Path(path).exists():
+            raise RuntimeError(f"DejaVu Sans font file not found: {path}")
+        pdf.add_font("DejaVu", style, path)
+    return "DejaVu"
+
+
 # ---------------------------------------------------------------------------
 # Colour constants (mirrors CSS design tokens)
 # ---------------------------------------------------------------------------
@@ -537,6 +560,7 @@ def build_trend_briefing_pdf(
     pdf = FPDF(orientation="L", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=12)
     pdf.set_margins(14, 12, 14)
+    _fam = _register_dejavu_fonts(pdf)
 
     cluster_signals: dict[str, Any] = signals.get("signals", {})
     data_span = signals.get("data_span_days", 0)
@@ -557,9 +581,9 @@ def build_trend_briefing_pdf(
 
     # ---- Cover page ----
     pdf.add_page()
-    pdf.set_font("Helvetica", "B", 20)
+    pdf.set_font(_fam, "B", 20)
     pdf.cell(0, 12, "GM Reddit — Trend Briefing", ln=True)
-    pdf.set_font("Helvetica", "", 11)
+    pdf.set_font(_fam, "", 11)
     pdf.ln(2)
 
     if computed_at:
@@ -574,9 +598,9 @@ def build_trend_briefing_pdf(
         pdf.cell(0, 7, "Cluster labels reflect thematic content only.", ln=True)
 
     pdf.ln(4)
-    pdf.set_font("Helvetica", "B", 12)
+    pdf.set_font(_fam, "B", 12)
     pdf.cell(0, 8, "Cluster Summary", ln=True)
-    pdf.set_font("Helvetica", "", 10)
+    pdf.set_font(_fam, "", 10)
 
     for cid_str in sorted_cids:
         label_info = labels.get(cid_str, {})
@@ -601,11 +625,11 @@ def build_trend_briefing_pdf(
         sig = cluster_signals.get(cid_str, {})
 
         pdf.add_page()
-        pdf.set_font("Helvetica", "B", 14)
+        pdf.set_font(_fam, "B", 14)
         short = str(label_info.get("short_label", f"Cluster {cid_str}"))
         pdf.cell(0, 9, f"Cluster {cid_str}: {short}", ln=True)
 
-        pdf.set_font("Helvetica", "", 10)
+        pdf.set_font(_fam, "", 10)
         detailed = str(label_info.get("detailed_label", ""))
         if detailed:
             pdf.multi_cell(0, 6, detailed)
@@ -615,9 +639,9 @@ def build_trend_briefing_pdf(
         if sig:
             conf = sig.get("confidence_banner", "low")
             conf_note = sig.get("confidence_note", "")
-            pdf.set_font("Helvetica", "B", 11)
+            pdf.set_font(_fam, "B", 11)
             pdf.cell(0, 7, f"Trend Signals  [{conf.upper()} confidence]", ln=True)
-            pdf.set_font("Helvetica", "", 10)
+            pdf.set_font(_fam, "", 10)
 
             if conf_note:
                 pdf.multi_cell(0, 6, conf_note)
@@ -636,16 +660,16 @@ def build_trend_briefing_pdf(
             if agreement:
                 pdf.cell(0, 6, f"  Signal agreement: {agreement}", ln=True)
         else:
-            pdf.set_font("Helvetica", "I", 10)
+            pdf.set_font(_fam, "I", 10)
             pdf.cell(0, 6, "Trend signals not available (run /api/trends/run first).", ln=True)
 
         pdf.ln(3)
 
         # Cluster metadata
-        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_font(_fam, "B", 11)
         pdf.cell(0, 7, "Cluster Metadata", ln=True)
-        pdf.set_font("Helvetica", "", 10)
-        pdf.cell(0, 6, f"  Size: {ctx.get('cluster_size', len(sig.get('velocity', {}).get('recent_count', 0) or 0))} comments", ln=True)
+        pdf.set_font(_fam, "", 10)
+        pdf.cell(0, 6, f"  Size: {ctx.get('cluster_size', 0)} comments", ln=True)
         top_vehicles = ctx.get("top_vehicles", [])
         if top_vehicles:
             pdf.cell(0, 6, f"  Top vehicles: {', '.join(str(v) for v in top_vehicles[:3])}", ln=True)
@@ -662,9 +686,9 @@ def build_trend_briefing_pdf(
         # Representative examples
         centroid_text = ctx.get("centroid_reps_text", "")
         if centroid_text:
-            pdf.set_font("Helvetica", "B", 11)
+            pdf.set_font(_fam, "B", 11)
             pdf.cell(0, 7, "Representative Comments", ln=True)
-            pdf.set_font("Courier", "", 8)
+            pdf.set_font(_fam, "", 8)
             for line in centroid_text.splitlines()[:6]:
                 if len(line) > 120:
                     for chunk_start in range(0, len(line), 120):
