@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 import time
@@ -14,7 +15,15 @@ from src.jobs import reconcile
 
 
 RUN_STATES = frozenset(
-    {"running", "completed", "completed_with_warnings", "blocked", "failed", "cancelled"}
+    {
+        "pending",
+        "running",
+        "completed",
+        "completed_with_warnings",
+        "blocked",
+        "failed",
+        "cancelled",
+    }
 )
 STEP_STATES = frozenset(
     {
@@ -503,6 +512,325 @@ class RunStore:
                 (run_id, step),
             ).fetchall()
         return [self._attempt_dict(row) for row in rows]
+
+    @staticmethod
+    def _lock_is_interrupted(row: sqlite3.Row, timestamp: float) -> bool:
+        pid = row["pid"]
+        pid_alive = False
+        if pid is not None:
+            try:
+                os.kill(int(pid), 0)
+                pid_alive = True
+            except OSError:
+                pass
+        heartbeat = row["heartbeat_at"]
+        heartbeat_stale = heartbeat is not None and timestamp - float(heartbeat) > 120
+        return not pid_alive or heartbeat_stale
+
+    def _reclaim_lock_in_transaction(self, row: sqlite3.Row, timestamp: float) -> None:
+        self._conn.execute("DELETE FROM tag_locks WHERE tag=?", (row["tag"],))
+        self._conn.execute(
+            """
+            UPDATE runs
+            SET state='failed', ended_at=?, warning=?, heartbeat_at=?
+            WHERE run_id=? AND state='pending'
+            """,
+            (
+                timestamp,
+                "Coordinator failed before adopting the reserved run.",
+                timestamp,
+                row["run_id"],
+            ),
+        )
+
+    def _reserve_lock_in_transaction(
+        self,
+        tag: str,
+        *,
+        run_id: str,
+        owner_id: str,
+        pid: int | None,
+        timestamp: float,
+    ) -> LockAcquireResult:
+        row = self._conn.execute(
+            "SELECT * FROM tag_locks WHERE tag=?", (tag,)
+        ).fetchone()
+        reclaimed = False
+        if row:
+            if not self._lock_is_interrupted(row, timestamp):
+                return LockAcquireResult(
+                    False,
+                    str(row["run_id"]),
+                    str(row["owner_id"]),
+                    False,
+                )
+            self._reclaim_lock_in_transaction(row, timestamp)
+            reclaimed = True
+        self._conn.execute(
+            """
+            INSERT INTO tag_locks (tag, owner_id, run_id, pid, acquired_at, heartbeat_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (tag, owner_id, run_id, pid, timestamp, timestamp),
+        )
+        return LockAcquireResult(True, run_id, owner_id, reclaimed)
+
+    def reserve_new_run(
+        self,
+        tag: str,
+        *,
+        run_id: str,
+        owner_id: str,
+        pid: int | None,
+        config: dict[str, Any],
+        step_names: Iterable[str],
+        now: float | None = None,
+    ) -> LockAcquireResult:
+        """Atomically reserve a tag and create a pending run ledger."""
+        timestamp = time.time() if now is None else float(now)
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            result = self._reserve_lock_in_transaction(
+                tag,
+                run_id=run_id,
+                owner_id=owner_id,
+                pid=pid,
+                timestamp=timestamp,
+            )
+            if not result.acquired:
+                self._conn.execute("COMMIT")
+                return result
+            self._conn.execute(
+                """
+                INSERT INTO runs
+                    (run_id, tag, state, started_at, config_json, coordinator_pid, heartbeat_at)
+                VALUES (?, ?, 'pending', ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    tag,
+                    timestamp,
+                    _json_dump(_scrub_secrets(config)),
+                    pid,
+                    timestamp,
+                ),
+            )
+            for step in step_names:
+                self.upsert_step(run_id, str(step), state="pending")
+            self._conn.execute("COMMIT")
+            return result
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+
+    def reserve_retry(
+        self,
+        tag: str,
+        *,
+        run_id: str,
+        owner_id: str,
+        pid: int | None,
+        step_names: Iterable[str],
+        now: float | None = None,
+    ) -> LockAcquireResult:
+        """Atomically reserve a tag and reset a terminal run for retry."""
+        timestamp = time.time() if now is None else float(now)
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            run = self._conn.execute(
+                "SELECT * FROM runs WHERE run_id=? AND tag=?", (run_id, tag)
+            ).fetchone()
+            if not run:
+                raise KeyError(run_id)
+            if run["state"] in {"pending", "running"}:
+                raise ValueError("run is still active")
+            result = self._reserve_lock_in_transaction(
+                tag,
+                run_id=run_id,
+                owner_id=owner_id,
+                pid=pid,
+                timestamp=timestamp,
+            )
+            if not result.acquired:
+                self._conn.execute("COMMIT")
+                return result
+            self._conn.execute(
+                """
+                UPDATE runs
+                SET state='pending', ended_at=NULL, warning=NULL,
+                    coordinator_pid=?, heartbeat_at=?
+                WHERE run_id=?
+                """,
+                (pid, timestamp, run_id),
+            )
+            for step in step_names:
+                self.upsert_step(run_id, str(step), state="pending")
+            self._conn.execute("COMMIT")
+            return result
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+
+    def adopt_reserved_run(
+        self,
+        tag: str,
+        *,
+        run_id: str,
+        owner_id: str,
+        pid: int,
+        now: float | None = None,
+    ) -> bool:
+        """Adopt a matching pending run without creating or reviving rows."""
+        timestamp = time.time() if now is None else float(now)
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            run = self._conn.execute(
+                "SELECT 1 FROM runs WHERE run_id=? AND tag=? AND state='pending'",
+                (run_id, tag),
+            ).fetchone()
+            lock = self._conn.execute(
+                "SELECT 1 FROM tag_locks WHERE tag=? AND run_id=? AND owner_id=?",
+                (tag, run_id, owner_id),
+            ).fetchone()
+            if not run or not lock:
+                self._conn.execute("COMMIT")
+                return False
+            self._conn.execute(
+                """
+                UPDATE runs
+                SET state='running', coordinator_pid=?, heartbeat_at=?,
+                    ended_at=NULL, warning=NULL
+                WHERE run_id=?
+                """,
+                (pid, timestamp, run_id),
+            )
+            self._conn.execute(
+                """
+                UPDATE tag_locks SET pid=?, heartbeat_at=?
+                WHERE tag=? AND owner_id=?
+                """,
+                (pid, timestamp, tag, owner_id),
+            )
+            self._conn.execute("COMMIT")
+            return True
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+
+    def attach_reserved_pid(
+        self,
+        tag: str,
+        *,
+        run_id: str,
+        owner_id: str,
+        pid: int,
+        now: float | None = None,
+    ) -> bool:
+        """Attach the spawned child PID before the coordinator adopts the run."""
+        timestamp = time.time() if now is None else float(now)
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            run_cursor = self._conn.execute(
+                """
+                UPDATE runs SET coordinator_pid=?, heartbeat_at=?
+                WHERE run_id=? AND tag=? AND state IN ('pending', 'running')
+                """,
+                (pid, timestamp, run_id, tag),
+            )
+            lock_cursor = self._conn.execute(
+                """
+                UPDATE tag_locks SET pid=?, heartbeat_at=?
+                WHERE tag=? AND run_id=? AND owner_id=?
+                """,
+                (pid, timestamp, tag, run_id, owner_id),
+            )
+            ok = run_cursor.rowcount == 1 and lock_cursor.rowcount == 1
+            self._conn.execute("COMMIT")
+            return ok
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+
+    def fail_reserved_run(
+        self,
+        tag: str,
+        *,
+        run_id: str,
+        owner_id: str,
+        warning: str,
+        now: float | None = None,
+    ) -> bool:
+        """Fail a pending reservation and release only its matching lock."""
+        timestamp = time.time() if now is None else float(now)
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = self._conn.execute(
+                """
+                UPDATE runs
+                SET state='failed', ended_at=?, warning=?, heartbeat_at=?
+                WHERE run_id=? AND tag=? AND state='pending'
+                """,
+                (timestamp, warning[:1000], timestamp, run_id, tag),
+            )
+            self._conn.execute(
+                "DELETE FROM tag_locks WHERE tag=? AND run_id=? AND owner_id=?",
+                (tag, run_id, owner_id),
+            )
+            self._conn.execute("COMMIT")
+            return cursor.rowcount == 1
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+
+    def reconcile_pending_run(self, run_id: str, *, now: float | None = None) -> bool:
+        """Fail and unlock a pending run whose coordinator died or went stale."""
+        timestamp = time.time() if now is None else float(now)
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            run = self._conn.execute(
+                "SELECT * FROM runs WHERE run_id=? AND state='pending'", (run_id,)
+            ).fetchone()
+            if not run:
+                self._conn.execute("COMMIT")
+                return False
+            pseudo_lock = {
+                "pid": run["coordinator_pid"],
+                "heartbeat_at": run["heartbeat_at"],
+            }
+            pid_alive = False
+            if pseudo_lock["pid"] is not None:
+                try:
+                    os.kill(int(pseudo_lock["pid"]), 0)
+                    pid_alive = True
+                except OSError:
+                    pass
+            heartbeat = pseudo_lock["heartbeat_at"]
+            stale = heartbeat is not None and timestamp - float(heartbeat) > 120
+            if pid_alive and not stale:
+                self._conn.execute("COMMIT")
+                return False
+            self._conn.execute(
+                """
+                UPDATE runs
+                SET state='failed', ended_at=?, warning=?, heartbeat_at=?
+                WHERE run_id=? AND state='pending'
+                """,
+                (
+                    timestamp,
+                    "Coordinator failed before adopting the reserved run.",
+                    timestamp,
+                    run_id,
+                ),
+            )
+            self._conn.execute(
+                "DELETE FROM tag_locks WHERE tag=? AND run_id=?",
+                (run["tag"], run_id),
+            )
+            self._conn.execute("COMMIT")
+            return True
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
 
     def acquire_tag_lock(
         self,

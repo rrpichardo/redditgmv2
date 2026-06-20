@@ -306,6 +306,7 @@ class AnalysisCoordinator:
         project_root: Path = _PROJECT_ROOT,
         child_runner: ChildRunner | None = None,
         steps_to_run: list[str] | None = None,
+        strict_adoption: bool = False,
     ):
         self.runtime_root = Path(runtime_root)
         self.db_path = Path(db_path)
@@ -320,6 +321,7 @@ class AnalysisCoordinator:
         self.prepare_result: PrepareResult | None = None
         self._store: RunStore | None = None
         self._lock_acquired = False
+        self.strict_adoption = strict_adoption
         # When set, only these steps will be executed; others are skipped (state left untouched)
         self.steps_to_run: list[str] | None = steps_to_run
 
@@ -341,34 +343,47 @@ class AnalysisCoordinator:
         self.runtime_root.mkdir(parents=True, exist_ok=True)
         self._store = RunStore(self.db_path)
         try:
-            lock = self.store.acquire_tag_lock(
-                self.tag,
-                owner_id=self.owner_id,
-                run_id=self.run_id,
-                pid=os.getpid(),
-            )
-            if not lock.acquired:
-                raise ActiveRunError(lock.active_run_id)
-            self._lock_acquired = True
-
-            # Retry path: run record already exists; just mark it running again.
-            # Fresh path: create the run record and initialize all steps as pending.
-            if self.steps_to_run is not None:
-                self.store.update_run(
-                    self.run_id,
-                    state="running",
-                    heartbeat_at=time.time(),
-                )
-            else:
-                self.store.create_run(
-                    self.run_id,
+            if self.strict_adoption:
+                adopted = self.store.adopt_reserved_run(
                     self.tag,
-                    config=self.config.persisted(),
-                    coordinator_pid=os.getpid(),
-                    heartbeat_at=time.time(),
+                    run_id=self.run_id,
+                    owner_id=self.owner_id,
+                    pid=os.getpid(),
                 )
-                for step in STEP_ORDER:
-                    self.store.upsert_step(self.run_id, step, state="pending")
+                if not adopted:
+                    raise RuntimeError(
+                        f"Run reservation adoption failed for {self.tag}/{self.run_id}."
+                    )
+                self._lock_acquired = True
+            else:
+                lock = self.store.acquire_tag_lock(
+                    self.tag,
+                    owner_id=self.owner_id,
+                    run_id=self.run_id,
+                    pid=os.getpid(),
+                )
+                if not lock.acquired:
+                    raise ActiveRunError(lock.active_run_id)
+                self._lock_acquired = True
+
+                # Retry path: run record already exists; just mark it running again.
+                # Fresh path: create the run record and initialize all steps as pending.
+                if self.steps_to_run is not None:
+                    self.store.update_run(
+                        self.run_id,
+                        state="running",
+                        heartbeat_at=time.time(),
+                    )
+                else:
+                    self.store.create_run(
+                        self.run_id,
+                        self.tag,
+                        config=self.config.persisted(),
+                        coordinator_pid=os.getpid(),
+                        heartbeat_at=time.time(),
+                    )
+                    for step in STEP_ORDER:
+                        self.store.upsert_step(self.run_id, step, state="pending")
             self._coordinator_status("running")
 
             # Retry path: if prepare is not in the steps to run, reconstruct PrepareResult
@@ -956,6 +971,7 @@ def main() -> None:
     parser.add_argument("--embedding_model", default="text-embedding-3-small")
     # When set, only execute this step and its transitive dependents; all other steps are skipped
     parser.add_argument("--retry-from-step", default="", dest="retry_from_step")
+    parser.add_argument("--strict-adoption", action="store_true")
     args = parser.parse_args()
 
     runtime_root = Path(args.runtime_root)
@@ -981,6 +997,7 @@ def main() -> None:
             embedding_model=args.embedding_model,
         ),
         steps_to_run=steps_to_run,
+        strict_adoption=args.strict_adoption,
     )
     try:
         result = coordinator.run()

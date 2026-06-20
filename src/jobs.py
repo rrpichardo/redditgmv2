@@ -196,6 +196,7 @@ def start_job(
     env: dict[str, str] | None = None,
     cwd: Path | None = None,
     log_path: Path | None = None,
+    job_id: str | None = None,
 ) -> dict:
     """Spawn a worker subprocess and write its initial status file.
 
@@ -204,7 +205,7 @@ def start_job(
 
     Returns the initial status dict with `state="running"` and `pid` set.
     """
-    job_id = uuid.uuid4().hex
+    job_id = job_id or uuid.uuid4().hex
     now = time.time()
 
     # Build the initial status dict before spawning so we have a clean baseline
@@ -240,6 +241,7 @@ def start_job(
         "--job_id", job_id,
         "--runtime_root", str(runtime_root),
     ] + extra_args
+    initial_status["cmd"] = cmd
 
     # Capture both streams in a durable log. The child inherits the descriptor,
     # so closing the parent's handle after Popen does not interrupt logging.

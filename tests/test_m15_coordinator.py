@@ -156,6 +156,87 @@ def test_scripted_run_writes_complete_ledger_logs_snapshots_and_latest(tmp_path:
     assert not (runtime_root / "gm" / "runs" / "run-1" / "staging").exists()
 
 
+def test_strict_coordinator_adopts_reserved_run(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    db_path = runtime_root / "runs.db"
+    _write_raw(runtime_root, "gm", _raw_rows(3))
+    with RunStore(db_path) as store:
+        reservation = store.reserve_new_run(
+            "gm",
+            run_id="run-1",
+            owner_id="job-1",
+            pid=os.getpid(),
+            config=_config().persisted(),
+            step_names=STEP_ORDER,
+        )
+        assert reservation.acquired is True
+
+    coordinator = AnalysisCoordinator(
+        runtime_root=runtime_root,
+        db_path=db_path,
+        tag="gm",
+        run_id="run-1",
+        job_id="job-1",
+        config=_config(),
+        child_runner=_successful_worker,
+        strict_adoption=True,
+    )
+
+    result = coordinator.run()
+
+    assert result["state"] == "completed"
+    with RunStore(db_path) as store:
+        assert store.get_run("run-1")["state"] == "completed"
+        assert store.get_tag_lock("gm") is None
+
+
+def test_strict_coordinator_does_not_create_missing_run(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    db_path = runtime_root / "runs.db"
+    coordinator = AnalysisCoordinator(
+        runtime_root=runtime_root,
+        db_path=db_path,
+        tag="gm",
+        run_id="missing",
+        job_id="job-1",
+        config=_config(),
+        child_runner=_successful_worker,
+        strict_adoption=True,
+    )
+
+    result = coordinator.run()
+
+    assert result["state"] == "failed"
+    with RunStore(db_path) as store:
+        assert store.get_run("missing") is None
+
+
+def test_strict_coordinator_does_not_revive_terminal_run(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    db_path = runtime_root / "runs.db"
+    with RunStore(db_path) as store:
+        store.create_run("run-1", "gm", config={}, state="failed")
+        store.acquire_tag_lock(
+            "gm", owner_id="job-1", run_id="run-1", pid=os.getpid()
+        )
+    coordinator = AnalysisCoordinator(
+        runtime_root=runtime_root,
+        db_path=db_path,
+        tag="gm",
+        run_id="run-1",
+        job_id="job-1",
+        config=_config(),
+        child_runner=_successful_worker,
+        strict_adoption=True,
+    )
+
+    result = coordinator.run()
+
+    assert result["state"] == "failed"
+    with RunStore(db_path) as store:
+        assert store.get_run("run-1")["state"] == "failed"
+
+
 def test_concurrent_run_is_rejected_by_tag_lock(tmp_path: Path) -> None:
     runtime_root = tmp_path / "runtime"
     db_path = runtime_root / "runs.db"

@@ -87,6 +87,51 @@ def test_analyze_returns_run_id_and_job_id():
     assert len(body["job_id"]) > 0
 
 
+def test_analyze_run_is_resolvable_before_response_returns():
+    tag = f"test_analyze_immediate_{uuid.uuid4().hex[:8]}"
+    with patch(
+        "app.start_job",
+        return_value={"job_id": "job-immediate", "state": "running", "pid": os.getpid()},
+    ):
+        response = client.post("/api/analyze", json={"tag": tag})
+
+    assert response.status_code == 200
+    run_id = response.json()["run_id"]
+    status = client.get(f"/api/pipeline/status?tag={tag}&run_id={run_id}")
+    assert status.status_code == 200
+    assert status.json()["run_id"] == run_id
+
+
+def test_analyze_second_request_gets_409_without_orphan_row():
+    tag = f"test_analyze_concurrent_{uuid.uuid4().hex[:8]}"
+    with patch(
+        "app.start_job",
+        return_value={"job_id": "job-concurrent", "state": "running", "pid": os.getpid()},
+    ):
+        first = client.post("/api/analyze", json={"tag": tag})
+        second = client.post("/api/analyze", json={"tag": tag})
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert second.json()["active_run_id"] == first.json()["run_id"]
+    with _store() as store:
+        assert len(store.list_runs(tag)) == 1
+
+
+def test_analyze_spawn_failure_marks_run_failed_and_releases_lock():
+    tag = f"test_analyze_spawn_failure_{uuid.uuid4().hex[:8]}"
+    with patch("app.start_job", side_effect=OSError("spawn failed")):
+        response = client.post("/api/analyze", json={"tag": tag})
+
+    assert response.status_code == 500
+    with _store() as store:
+        runs = store.list_runs(tag)
+        assert len(runs) == 1
+        assert runs[0]["state"] == "failed"
+        assert "spawn failed" in (runs[0]["warning"] or "")
+        assert store.get_tag_lock(tag) is None
+
+
 # ---------------------------------------------------------------------------
 # 2. POST /api/analyze — 409 when tag lock is held
 # ---------------------------------------------------------------------------
