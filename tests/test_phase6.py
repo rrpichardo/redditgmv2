@@ -447,6 +447,9 @@ class TestQaStatusEndpoint:
     def client_and_runtime(self, tmp_path, monkeypatch):
         import app as app_module
         monkeypatch.setattr(app_module, "RUNTIME", tmp_path / "runtime")
+        monkeypatch.setattr(app_module, "load_api_key", lambda: "")
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         from fastapi.testclient import TestClient
         return TestClient(app_module.app), tmp_path / "runtime"
 
@@ -499,6 +502,9 @@ class TestQaSearchEndpoint:
     def client_and_runtime(self, tmp_path, monkeypatch):
         import app as app_module
         monkeypatch.setattr(app_module, "RUNTIME", tmp_path / "runtime")
+        monkeypatch.setattr(app_module, "load_api_key", lambda: "")
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         from fastapi.testclient import TestClient
         return TestClient(app_module.app), tmp_path / "runtime"
 
