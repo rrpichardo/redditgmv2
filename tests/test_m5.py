@@ -681,6 +681,13 @@ def test_pipeline_retry_conflict_selects_active_run(live_server, browser_page) -
     assert "Request failed with 409" not in page.inner_text("#statusBar")
 
 
+def test_runtime_root_env_override(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    override = tmp_path / "shared-runtime"
+    assert app_module.resolve_runtime_root(root, {"REDDITGM_RUNTIME_ROOT": str(override)}) == override.resolve()
+    assert app_module.resolve_runtime_root(root, {}) == (root / "runtime").resolve()
+
+
 def test_view_change_uses_short_transform_opacity_animation(live_server, browser_page) -> None:
     page = browser_page
     _load_browser_with_data(page, live_server)

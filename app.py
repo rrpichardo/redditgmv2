@@ -15,7 +15,7 @@ import time
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import pandas as pd
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
@@ -60,7 +60,15 @@ from src.gm_insights import (
 
 
 ROOT = Path(__file__).resolve().parent
-RUNTIME = ROOT / "runtime"
+
+
+def resolve_runtime_root(root: Path, env: Mapping[str, str] | None = None) -> Path:
+    values = os.environ if env is None else env
+    configured = values.get("REDDITGM_RUNTIME_ROOT", "").strip()
+    return Path(configured).expanduser().resolve() if configured else (root / "runtime").resolve()
+
+
+RUNTIME = resolve_runtime_root(ROOT)
 WEB = ROOT / "web"
 LEGACY_ROOT = Path(os.getenv("REDDITGM_LEGACY_ROOT", "/Users/ricopichardo/Claude/redditgm"))
 DEFAULT_TAG = "gm_vehicle_on_demand"
