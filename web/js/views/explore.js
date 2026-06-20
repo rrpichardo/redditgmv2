@@ -5,9 +5,7 @@ import { state, $, $$, esc, fmt, humanLabel, debounce } from "../state.js";
 import { chartPanel, metricGrid, emptyState } from "../components.js";
 import { loadRun, loadDetailCharts } from "../app.js";
 import { render } from "../nav.js";
-import { qaView, startQaBuildIndex, refreshQaStatus, submitQaQuestion, submitQaSearch } from "./qa.js";
-
-const EVIDENCE_PAGE_SIZE = 25;
+import { apiUrl, request } from "../api.js";
 
 // ---------------------------------------------------------------------------
 // Filters
@@ -95,11 +93,11 @@ export function filterPanel() {
       ${opts.commentType?.length ? sel("commentType", "Comment type", opts.commentType, "comment_type") : ""}
       ${opts.competitor?.length ? sel("competitor", "Competitor", opts.competitor) : ""}
       <div class="filter-control">
-        <label class="filter-label" for="filter-search">Search text</label>
-        <input id="filter-search" name="search" type="search" autocomplete="off" class="filter-input" value="${esc(f.search || "")}" placeholder="keyword…">
+        <label class="filter-label" for="filter-search">Search evidence</label>
+        <input id="filter-search" name="search" type="search" autocomplete="off" class="filter-input" value="${esc(f.search || "")}" placeholder="Search post title, comment & summary…">
       </div>
       <div class="filter-control">
-        <label class="filter-label" for="filter-minscore">Min score</label>
+        <label class="filter-label" for="filter-minscore">Minimum Reddit score</label>
         <input id="filter-minscore" name="min_score" type="number" inputmode="decimal" autocomplete="off" class="filter-input" value="${f.min_score || ""}" placeholder="0">
       </div>
       ${dateRange}
@@ -139,15 +137,24 @@ export function applyFilters() {
   const dateEndEl = $("#filter-date-end");
   if (dateEndEl?.value) f.date_end = dateEndEl.value;
   state.filters = f;
-  state.evidencePage = 0;  // reset to first page on any filter change
+  state.evidence.page = 1;
   loadRun();
 }
 
 // Reset filters and reload the run.
 export function clearFilters() {
   state.filters = {};
-  state.evidencePage = 0;
+  state.evidence.page = 1;
   loadRun();
+}
+
+export async function loadEvidence(page = state.evidence.page || 1) {
+  return request(apiUrl("/api/evidence", {
+    tag: state.tag,
+    ...buildFilterParams(),
+    page,
+    page_size: state.evidence.page_size || 10,
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -176,24 +183,33 @@ export function evidenceFeed(rows) {
 }
 
 // Single evidence card for the Explorer — shows title + expandable body text.
-function evidenceCard(row) {
+function evidenceSection(label, title, body, index, kind) {
+  if (!title && !body) return "";
+  const controlId = `evidence-${index}-${kind}`;
+  return `<section class="evidence-section" aria-labelledby="${controlId}-label">
+    <div class="evidence-section-head">
+      <span id="${controlId}-label" class="evidence-section-label">${label}</span>
+      ${title ? `<strong class="evidence-section-title">${esc(title)}</strong>` : ""}
+    </div>
+    ${body ? `<p id="${controlId}" class="evidence-copy is-clamped" data-evidence-copy>${esc(body)}</p>
+      <button class="evidence-expand" type="button" data-evidence-expand aria-controls="${controlId}" aria-expanded="false" hidden>Show more</button>` : ""}
+  </section>`;
+}
+
+function evidenceCard(row, index) {
   const title = row.title_norm || "";
-  const body = row.target_text || "";
-  const desc = row.description || "";
+  const postBody = row.post_body_norm || "";
+  const commentBody = row.comment_body_norm || (row.source_type === "comment" ? row.target_text || "" : "");
+  const fallbackBody = !postBody && !commentBody ? row.target_text || row.description || "" : "";
   const date = row.created_at_norm || "";
   const subreddit = row.subreddit_norm || "";
   const vehicle = row.vehicle_mentioned || "";
   const sentiment = row.sentiment || "";
   const theme = humanLabel(row.top_complaint_category || "");
-  const score = row.score_norm != null ? Number(row.score_norm).toFixed(2) : "";
+  const score = row.score_norm != null ? Number(row.score_norm) : 0;
   const permalink = row.permalink_norm
     ? `https://reddit.com${row.permalink_norm}`
     : "";
-
-  // Prefer raw body text; fall back to the AI-generated description.
-  const content = body || desc;
-  const snippet = content.slice(0, 120);
-  const hasMore = content.length > 120;
 
   return `<article class="evidence-item">
     <div class="evidence-meta">
@@ -202,43 +218,36 @@ function evidenceCard(row) {
       ${vehicle ? `<span>${esc(vehicle)}</span>` : ""}
       ${sentiment ? `<span class="tag">${esc(sentiment)}</span>` : ""}
       ${theme ? `<span class="tag">${esc(theme)}</span>` : ""}
-      ${score ? `<span style="color:var(--muted);font-size:0.8rem">score ${score}</span>` : ""}
+      <span>Reddit score ${esc(score)}</span>
     </div>
-    ${title
-      ? (permalink
-        ? `<a href="${esc(permalink)}" target="_blank" rel="noreferrer" class="evidence-title">${esc(title)}</a>`
-        : `<strong class="evidence-title">${esc(title)}</strong>`)
-      : ""}
-    ${content ? `
-    <details class="evidence-body">
-      <summary>${esc(snippet)}${hasMore ? "…" : ""}</summary>
-      ${hasMore ? `<p class="evidence-body-full">${esc(content)}</p>` : ""}
-    </details>` : ""}
+    ${evidenceSection("Post", title, postBody, index, "post")}
+    ${evidenceSection("Comment", "", commentBody, index, "comment")}
+    ${evidenceSection("Evidence", "", fallbackBody, index, "fallback")}
+    ${permalink ? `<a href="${esc(permalink)}" target="_blank" rel="noreferrer" class="evidence-external-link external-link" aria-label="Open this evidence on Reddit">↗</a>` : ""}
   </article>`;
 }
 
-// Paginated evidence card list for the Explorer view, sorted by relevance (score_norm).
-// Pagination state lives in state.evidencePage; prev/next buttons are bound in bindExplorerEvents().
-export function evidenceTable(rows) {
-  if (!rows?.length) return `<div class="notice">No evidence rows for this view.</div>`;
+export function evidenceTable() {
+  const evidence = state.evidence || {};
+  const rows = state.evidence.items || [];
+  if (!rows.length) return `<div class="notice">No evidence rows match this view.</div>`;
 
-  const total = rows.length;
-  const totalPages = Math.max(1, Math.ceil(total / EVIDENCE_PAGE_SIZE));
-  const page = Math.min(Math.max(0, state.evidencePage || 0), totalPages - 1);
-  const slice = rows.slice(page * EVIDENCE_PAGE_SIZE, (page + 1) * EVIDENCE_PAGE_SIZE);
+  const page = evidence.page || 1;
+  const totalPages = evidence.total_pages || 1;
+  const total = evidence.total_items || rows.length;
 
   const pager = `<div class="evidence-pager">
-    <button id="evidencePrevBtn" class="button small" ${page === 0 ? "disabled" : ""}>← Prev</button>
+    <button id="evidencePrevBtn" class="button small" ${page <= 1 ? "disabled" : ""}>← Prev</button>
     <span class="evidence-pager-info">
-      Page ${page + 1} of ${totalPages} · ${fmt.format(total)} rows · sorted by relevance
+      Page ${page} of ${totalPages} · ${fmt.format(total)} rows · sorted by Reddit score
     </span>
-    <button id="evidenceNextBtn" class="button small" ${page >= totalPages - 1 ? "disabled" : ""}>Next →</button>
+    <button id="evidenceNextBtn" class="button small" ${page >= totalPages ? "disabled" : ""}>Next →</button>
   </div>`;
 
   return `
     ${pager}
     <div class="evidence-feed">
-      ${slice.map((row) => evidenceCard(row)).join("")}
+      ${rows.map((row, index) => evidenceCard(row, index)).join("")}
     </div>
     ${totalPages > 1 ? pager.replace("evidencePrevBtn", "evidencePrevBtn2").replace("evidenceNextBtn", "evidenceNextBtn2") : ""}
   `;
@@ -313,53 +322,41 @@ export function exploreView() {
 
     <section class="panel spaced">
       <div class="panel-head"><h2>Evidence</h2><small>matched rows · ranked by relevance</small></div>
-      ${evidenceTable(state.data.evidence)}
+      ${evidenceTable()}
     </section>`;
 }
 
 // ---------------------------------------------------------------------------
-// Combined Data Explorer tab (explore + Q&A folded in at the bottom)
-// ---------------------------------------------------------------------------
-
-// explorerView stitches the full explore HTML with the Q&A section below a divider.
 export function explorerView() {
-  return `
-    ${exploreView()}
-    <hr style="margin: 2rem 0;" />
-    <section class="panel">
-      <div class="panel-head"><h2>Q&amp;A</h2><small>evidence-backed answers from your data</small></div>
-    </section>
-    ${qaView()}
-  `;
+  return exploreView();
 }
 
-// bindExplorerEvents covers filter controls, evidence pagination, and Q&A action buttons.
 export function bindExplorerEvents() {
   bindFilterEvents();
 
-  // Evidence pagination — both the top and bottom button pairs share the same handlers.
-  const prevPage = () => {
-    if ((state.evidencePage || 0) > 0) {
-      state.evidencePage = (state.evidencePage || 0) - 1;
-      render();
-    }
+  document.querySelectorAll("[data-evidence-copy]").forEach((copy) => {
+    const button = copy.parentElement?.querySelector("[data-evidence-expand]");
+    if (!button) return;
+    const overflows = copy.scrollHeight > copy.clientHeight + 1;
+    button.hidden = !overflows;
+    if (!overflows) copy.classList.remove("is-clamped");
+    button.addEventListener("click", () => {
+      const expanded = button.getAttribute("aria-expanded") === "true";
+      button.setAttribute("aria-expanded", String(!expanded));
+      button.textContent = expanded ? "Show more" : "Show less";
+      copy.classList.toggle("is-clamped", expanded);
+    });
+  });
+
+  const goToEvidencePage = async (page) => {
+    state.evidence = await loadEvidence(page);
+    render();
   };
-  const nextPage = () => {
-    const total = state.data?.evidence?.length || 0;
-    const maxPage = Math.max(0, Math.ceil(total / EVIDENCE_PAGE_SIZE) - 1);
-    if ((state.evidencePage || 0) < maxPage) {
-      state.evidencePage = (state.evidencePage || 0) + 1;
-      render();
-    }
-  };
+  const prevPage = () => goToEvidencePage(Math.max(1, (state.evidence.page || 1) - 1));
+  const nextPage = () => goToEvidencePage(Math.min(state.evidence.total_pages, (state.evidence.page || 1) + 1));
   $("#evidencePrevBtn")?.addEventListener("click", prevPage);
   $("#evidenceNextBtn")?.addEventListener("click", nextPage);
   $("#evidencePrevBtn2")?.addEventListener("click", prevPage);
   $("#evidenceNextBtn2")?.addEventListener("click", nextPage);
 
-  // Q&A bindings.
-  $("#qaBuildIndexBtn")?.addEventListener("click", startQaBuildIndex);
-  $("#qaRefreshBtn")?.addEventListener("click", refreshQaStatus);
-  $("#qaSubmitBtn")?.addEventListener("click", submitQaQuestion);
-  $("#qaSearchBtn")?.addEventListener("click", submitQaSearch);
 }

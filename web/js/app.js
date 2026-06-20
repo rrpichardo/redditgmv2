@@ -5,7 +5,7 @@ import { apiUrl, request } from "./api.js";
 import { setNotice, setBusy } from "./components.js";
 import { render, setView, handleSaveKindClick, handleTabKeydown } from "./nav.js";
 import { bindResize, renderChartInto } from "./charts.js";
-import { buildFilterParams, hasActiveFilters } from "./views/explore.js";
+import { buildFilterParams, hasActiveFilters, loadEvidence } from "./views/explore.js";
 import { collectProgressText, updateCollectUi, startCollectPolling } from "./views/collect.js";
 import { loadConfig } from "./views/settings.js";
 
@@ -19,16 +19,20 @@ export async function loadRun({ silent = false } = {}) {
   if (!silent) setNotice("Loading run…");
   try {
     const params = buildFilterParams();
-    const [runResult, trendsResult, timeseriesResult] = await Promise.allSettled([
+    const [runResult, trendsResult, timeseriesResult, evidenceResult] = await Promise.allSettled([
       request(apiUrl("/api/run", { tag: state.tag, ...params })),
       request(apiUrl("/api/trends", { tag: state.tag })),
       request(apiUrl("/api/trends/timeseries", { tag: state.tag })),
+      loadEvidence(),
     ]);
 
     if (runResult.status === "rejected") throw runResult.reason;
     state.data = runResult.value;
     state.trendsData = trendsResult.status === "fulfilled" ? trendsResult.value : null;
     state.timeseriesData = timeseriesResult.status === "fulfilled" ? timeseriesResult.value : null;
+    state.evidence = evidenceResult.status === "fulfilled"
+      ? evidenceResult.value
+      : { ...state.evidence, items: [], total_items: 0, total_pages: 0 };
 
     const collectStatus = await request(
       apiUrl("/api/collect/status", { tag: state.tag })

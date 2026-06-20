@@ -687,6 +687,99 @@ h3 { font-size: 0.875rem; font-weight: 700; }
   font-family: "Fira Code", monospace;
 }
 
+.evidence-section {
+  position: relative;
+  padding: 0.65rem 0;
+  border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+}
+.evidence-section:first-of-type { border-top: 0; }
+.evidence-section-head { display: flex; align-items: baseline; gap: 0.55rem; }
+.evidence-section-label {
+  flex: 0 0 auto;
+  color: var(--blue);
+  font-family: "Fira Code", monospace;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.evidence-section-title { color: var(--ink); font-size: 0.86rem; line-height: 1.4; }
+.evidence-copy {
+  margin: 0.3rem 0 0;
+  color: var(--ink-2);
+  font-size: 0.81rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.evidence-copy.is-clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.evidence-expand {
+  margin-top: 0.25rem;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--blue);
+  cursor: pointer;
+  font: 600 0.7rem/1.4 "Fira Code", monospace;
+}
+.evidence-expand:hover { text-decoration: underline; text-underline-offset: 3px; }
+.evidence-external-link,
+.evidence-item a.evidence-external-link {
+  position: absolute;
+  right: 0.75rem;
+  top: 0.7rem;
+  display: grid;
+  place-items: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-decoration: none;
+}
+.evidence-item { position: relative; padding-right: 3rem; }
+
+.insight-family { margin-top: 1.5rem; }
+.insight-family + .insight-family { margin-top: 2.25rem; }
+.insight-family-head {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(280px, 1.2fr);
+  gap: 1.5rem;
+  align-items: end;
+  margin-bottom: 0.85rem;
+  padding: 0 0 0.75rem;
+  border-bottom: 1px solid var(--line-2);
+}
+.insight-family-head h2 { margin: 0.15rem 0 0; font-size: 1.15rem; letter-spacing: -0.025em; }
+.insight-family-head p { margin: 0; color: var(--muted); font-size: 0.78rem; line-height: 1.6; }
+.insight-family-kicker {
+  color: var(--blue);
+  font-family: "Fira Code", monospace;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.inline-glossary {
+  margin: 0.65rem 0 0;
+  color: var(--muted);
+  font-family: "Fira Code", monospace;
+  font-size: 0.66rem;
+}
+.inline-glossary strong { color: var(--ink-2); }
+
+@media (max-width: 720px) {
+  .insight-family-head { grid-template-columns: 1fr; gap: 0.4rem; }
+  .evidence-item { padding-right: 2.8rem; }
+}
+
 /* ── Collect form ────────────────────────────── */
 .form-grid {
   display: grid;

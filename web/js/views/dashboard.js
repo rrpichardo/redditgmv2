@@ -272,39 +272,52 @@ export function dashboard() {
     : `<div class="notice" style="margin-bottom:1rem">Run analysis to see trend signals.</div>`;
 
   return `
-    ${signalsSection}
-    <div style="border-top:1px solid #e2e8f0;margin:4px 0 16px"></div>
     <div>${metricGrid(data.summary.metrics)}</div>
-    <div class="panel-grid" style="margin-top:1rem">
-      ${chartPanel("sentiment", "Sentiment distribution")}
-      ${chartPanel("flags", "Signal flags")}
-      ${chartPanel("complaints", "Complaint themes")}
-    </div>
-    <div class="panel-grid two" style="margin-top:0.75rem">
-      <section class="panel chart-panel">
-        <div class="panel-head"><h3>Velocity × Z-score quadrant</h3><small>color = confidence</small></div>
-        <div id="quadrantChart" role="img" aria-label="Velocity by Z-score quadrant chart" style="height:280px"></div>
-        ${chartDataDetails("quadrantChart", "Velocity × Z-score quadrant")}
-      </section>
-      <section class="panel chart-panel">
-        <div class="panel-head"><h3>Trend leaderboard</h3><small>by velocity</small></div>
-        <div id="leaderboardChart" role="img" aria-label="Trend leaderboard chart" style="height:280px"></div>
-        ${chartDataDetails("leaderboardChart", "Trend leaderboard")}
-      </section>
-    </div>
-    <div class="panel-grid two" style="margin-top:0.75rem">
-      <section class="panel chart-panel">
-        <div class="panel-head"><h3>Negative share over time</h3><small>${esc(granularityLabel)} · rate</small></div>
-        <div id="negTimeChart" role="img" aria-label="Negative mentions over time chart" style="height:220px"></div>
-        ${chartDataDetails("negTimeChart", "Negative mentions over time")}
-      </section>
-      <section class="panel chart-panel">
-        <div class="panel-head"><h3>Sentiment volume over time</h3><small>${esc(granularityLabel)} counts · affected by collection volume</small></div>
-        <div id="sentTimeChart" role="img" aria-label="Sentiment over time chart" style="height:220px"></div>
-        ${chartDataDetails("sentTimeChart", "Sentiment over time")}
-      </section>
-    </div>
-    <div class="panel-grid" style="margin-top:0.75rem">
-      ${chartPanel("priority", "Priority map", "volume × negativity")}
-    </div>`;
+    <section class="insight-family insight-family--predefined" aria-labelledby="predefined-heading">
+      <div class="insight-family-head">
+        <div><span class="insight-family-kicker">Model taxonomy</span><h2 id="predefined-heading">Predefined categories</h2></div>
+        <p>These are fixed choices assigned by the model—not hand-verified labels and not your subreddit list.</p>
+      </div>
+      <div class="panel-grid">
+        ${chartPanel("sentiment", "Sentiment distribution")}
+        ${chartPanel("flags", "Signal flags")}
+        ${chartPanel("complaints", "Complaint themes")}
+      </div>
+      <div class="panel-grid" style="margin-top:0.75rem">
+        ${chartPanel("vehicles", "Vehicles")}
+      </div>
+      <p class="inline-glossary"><strong>Glossary</strong> · not_applicable = not a complaint</p>
+    </section>
+
+    <section class="insight-family insight-family--discovered" aria-labelledby="discovered-heading">
+      <div class="insight-family-head">
+        <div><span class="insight-family-kicker">Cluster signals</span><h2 id="discovered-heading">Discovered from your data</h2></div>
+        <p>These signals are found by clustering your records. They are emerging themes—not fixed categories or subreddit lists.</p>
+      </div>
+      ${signalsSection}
+      <div class="panel-grid two" style="margin-top:0.75rem">
+        <section class="panel chart-panel">
+          <div class="panel-head"><h3>Velocity × Z-score quadrant</h3><small>color = confidence</small></div>
+          <div id="quadrantChart" role="img" aria-label="Velocity by Z-score quadrant chart" style="height:280px"></div>
+          ${chartDataDetails("quadrantChart", "Velocity × Z-score quadrant")}
+        </section>
+        <section class="panel chart-panel">
+          <div class="panel-head"><h3>Trend leaderboard</h3><small>by velocity</small></div>
+          <div id="leaderboardChart" role="img" aria-label="Trend leaderboard chart" style="height:280px"></div>
+          ${chartDataDetails("leaderboardChart", "Trend leaderboard")}
+        </section>
+      </div>
+      <div class="panel-grid two" style="margin-top:0.75rem">
+        <section class="panel chart-panel">
+          <div class="panel-head"><h3>Negative share over time</h3><small>${esc(granularityLabel)} · rate</small></div>
+          <div id="negTimeChart" role="img" aria-label="Negative mentions over time chart" style="height:220px"></div>
+          ${chartDataDetails("negTimeChart", "Negative mentions over time")}
+        </section>
+        <section class="panel chart-panel">
+          <div class="panel-head"><h3>Sentiment volume over time</h3><small>${esc(granularityLabel)} counts · affected by collection volume</small></div>
+          <div id="sentTimeChart" role="img" aria-label="Sentiment over time chart" style="height:220px"></div>
+          ${chartDataDetails("sentTimeChart", "Sentiment over time")}
+        </section>
+      </div>
+    </section>`;
 }

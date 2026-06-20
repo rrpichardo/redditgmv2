@@ -33,7 +33,14 @@ export const state = {
   qaHits: null,
   qaAnswer: null,
   qaPollTimer: null,
-  evidencePage: 0,  // current page index for the evidence card list (25 per page)
+  evidence: {
+    items: [],
+    page: 1,
+    page_size: 10,
+    total_items: 0,
+    total_pages: 0,
+    score_unit: "reddit_score",
+  },
 
   // Pipeline tracking (M2-frontend implements full UI)
   pipelineRunId: null,
