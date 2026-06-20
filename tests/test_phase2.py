@@ -395,6 +395,34 @@ class TestStartJob:
         assert isinstance(status["pid"], int)
         assert status["pid"] > 0
 
+    def test_explicit_job_id_is_used_once_in_child_command(self, tmp_path):
+        import json
+        from src.jobs import start_job
+
+        args_path = tmp_path / "args.json"
+        script = tmp_path / "capture_args.py"
+        script.write_text(
+            "import json, pathlib, sys\n"
+            f"pathlib.Path({str(args_path)!r}).write_text(json.dumps(sys.argv))\n",
+            encoding="utf-8",
+        )
+
+        status = start_job(
+            runtime_root=tmp_path,
+            tag="test_tag",
+            kind="analyze",
+            script=script,
+            extra_args=[],
+            cwd=tmp_path,
+            job_id="job-fixed",
+        )
+        os.waitpid(status["pid"], 0)
+        child_args = json.loads(args_path.read_text(encoding="utf-8"))
+
+        assert status["job_id"] == "job-fixed"
+        assert child_args.count("--job_id") == 1
+        assert child_args[child_args.index("--job_id") + 1] == "job-fixed"
+
 
 # ---------------------------------------------------------------------------
 # TestClassifyJobRun

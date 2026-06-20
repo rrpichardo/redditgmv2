@@ -15,7 +15,7 @@ import time
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import pandas as pd
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
@@ -60,7 +60,15 @@ from src.gm_insights import (
 
 
 ROOT = Path(__file__).resolve().parent
-RUNTIME = ROOT / "runtime"
+
+
+def resolve_runtime_root(root: Path, env: Mapping[str, str] | None = None) -> Path:
+    values = os.environ if env is None else env
+    configured = values.get("REDDITGM_RUNTIME_ROOT", "").strip()
+    return Path(configured).expanduser().resolve() if configured else (root / "runtime").resolve()
+
+
+RUNTIME = resolve_runtime_root(ROOT)
 WEB = ROOT / "web"
 LEGACY_ROOT = Path(os.getenv("REDDITGM_LEGACY_ROOT", "/Users/ricopichardo/Claude/redditgm"))
 DEFAULT_TAG = "gm_vehicle_on_demand"
@@ -1485,16 +1493,30 @@ def qa_answer(request: QaAnswerRequest) -> JSONResponse:
 def analyze(request: AnalyzeRequest) -> JSONResponse:
     """Launch the full analysis pipeline as a durable run in the SQLite ledger."""
     tag = clean_tag(request.tag)
-    # Reclaim stale locks before checking, then reject if still held
-    with RunStore(RUNTIME / "runs.db") as store:
-        store.reconcile_tag_lock(tag)
-        lock = store.get_tag_lock(tag)
-    if lock:
-        return run_active_response(tag, lock["run_id"])
-
     run_id = uuid.uuid4().hex
-    job_id = uuid.uuid4().hex
+    owner_id = uuid.uuid4().hex
     pcfg = provider_config(request.provider, request.model, request.api_key)
+    n_clusters = max(2, request.n_clusters)
+    run_config = {
+        "provider": pcfg.provider,
+        "model": pcfg.model,
+        "base_url": pcfg.base_url,
+        "api_key_env": pcfg.api_key_env,
+        "n_clusters": n_clusters,
+        "embedding_model": "text-embedding-3-small",
+    }
+
+    with RunStore(RUNTIME / "runs.db") as store:
+        reservation = store.reserve_new_run(
+            tag,
+            run_id=run_id,
+            owner_id=owner_id,
+            pid=os.getpid(),
+            config=run_config,
+            step_names=STEP_ORDER,
+        )
+    if not reservation.acquired:
+        return run_active_response(tag, reservation.active_run_id or "unknown")
 
     # API key goes into the subprocess env, never on the CLI
     env: dict[str, str] = {}
@@ -1510,11 +1532,38 @@ def analyze(request: AnalyzeRequest) -> JSONResponse:
         "--base_url", pcfg.base_url,
         "--model", pcfg.model,
         "--api_key_env", pcfg.api_key_env,
-        "--n_clusters", str(max(2, request.n_clusters)),
-        "--job_id", job_id,
+        "--n_clusters", str(n_clusters),
+        "--strict-adoption",
     ]
-    status = start_job(RUNTIME, tag, "analyze", ROOT / "scripts" / "analyze_run.py", extra_args, env=env, cwd=ROOT)
-    return safe_json({"run_id": run_id, "job_id": status["job_id"]})
+    try:
+        status = start_job(
+            RUNTIME,
+            tag,
+            "analyze",
+            ROOT / "scripts" / "analyze_run.py",
+            extra_args,
+            env=env,
+            cwd=ROOT,
+            job_id=owner_id,
+        )
+        with RunStore(RUNTIME / "runs.db") as store:
+            if not store.attach_reserved_pid(
+                tag,
+                run_id=run_id,
+                owner_id=owner_id,
+                pid=int(status["pid"]),
+            ):
+                raise RuntimeError("Coordinator reservation disappeared during launch.")
+    except Exception as exc:
+        with RunStore(RUNTIME / "runs.db") as store:
+            store.fail_reserved_run(
+                tag,
+                run_id=run_id,
+                owner_id=owner_id,
+                warning=str(exc),
+            )
+        raise HTTPException(status_code=500, detail=f"Pipeline launch failed: {exc}") from exc
+    return safe_json({"run_id": run_id, "job_id": owner_id})
 
 
 @app.get("/api/pipeline/status")
@@ -1522,6 +1571,7 @@ def pipeline_status(tag: str = DEFAULT_TAG, run_id: str = "") -> JSONResponse:
     """Return the full status of one pipeline run including per-step details."""
     tag = clean_tag(tag)
     with RunStore(RUNTIME / "runs.db") as store:
+        store.reconcile_pending_run(run_id)
         run = require_pipeline_run(store, tag, run_id)
         steps_rows = store.get_steps(run_id, STEP_ORDER)
         # Build per-step dicts with artifact URLs and log availability
@@ -1567,6 +1617,9 @@ def pipeline_runs(tag: str = DEFAULT_TAG, limit: int = 20) -> JSONResponse:
     """List recent pipeline runs for a tag."""
     tag = clean_tag(tag)
     with RunStore(RUNTIME / "runs.db") as store:
+        for pending in store.list_runs(tag, limit=min(limit, 100)):
+            if pending["state"] == "pending":
+                store.reconcile_pending_run(pending["run_id"])
         runs = store.list_runs(tag, limit=min(limit, 100))
     return safe_json(runs)
 
@@ -1660,23 +1713,24 @@ def pipeline_cancel(request: PipelineCancelRequest) -> JSONResponse:
 def pipeline_retry(request: PipelineRetryRequest) -> JSONResponse:
     """Retry a failed/completed run from a specific step (re-runs the step and its dependents)."""
     tag = clean_tag(request.tag)
-    # Check the tag writer lock first — refuse if another run is active for this tag
-    with RunStore(RUNTIME / "runs.db") as _lock_store:
-        _lock_store.reconcile_tag_lock(tag)
-        _active_lock = _lock_store.get_tag_lock(tag)
-    if _active_lock:
-        return run_active_response(tag, _active_lock["run_id"])
     if request.step not in STEP_ORDER:
         raise HTTPException(status_code=400, detail=f"Unknown step {request.step!r}. Valid: {STEP_ORDER}")
 
+    owner_id = uuid.uuid4().hex
+    steps = retry_steps(request.step)
     with RunStore(RUNTIME / "runs.db") as store:
         run = require_pipeline_run(store, tag, request.run_id)
-        if run["state"] == "running":
+        if run["state"] in {"pending", "running"}:
             raise HTTPException(status_code=400, detail="Run is still active; cancel it first.")
-        # Reset all affected steps to pending so the coordinator can re-run them
-        steps = retry_steps(request.step)
-        for s in steps:
-            store.upsert_step(request.run_id, s, state="pending")
+        reservation = store.reserve_retry(
+            tag,
+            run_id=request.run_id,
+            owner_id=owner_id,
+            pid=os.getpid(),
+            step_names=steps,
+        )
+    if not reservation.acquired:
+        return run_active_response(tag, reservation.active_run_id or "unknown")
 
     # Determine provider from stored run config, fall back to defaults
     run_config = run.get("config") or {}
@@ -1700,9 +1754,37 @@ def pipeline_retry(request: PipelineRetryRequest) -> JSONResponse:
         "--api_key_env", pcfg.api_key_env,
         "--n_clusters", str(max(2, run_config.get("n_clusters", 10))),
         "--retry-from-step", request.step,
+        "--strict-adoption",
     ]
-    status = start_job(RUNTIME, tag, "analyze", ROOT / "scripts" / "analyze_run.py", extra_args, env=env, cwd=ROOT)
-    return safe_json({"run_id": request.run_id, "job_id": status["job_id"]})
+    try:
+        status = start_job(
+            RUNTIME,
+            tag,
+            "analyze",
+            ROOT / "scripts" / "analyze_run.py",
+            extra_args,
+            env=env,
+            cwd=ROOT,
+            job_id=owner_id,
+        )
+        with RunStore(RUNTIME / "runs.db") as store:
+            if not store.attach_reserved_pid(
+                tag,
+                run_id=request.run_id,
+                owner_id=owner_id,
+                pid=int(status["pid"]),
+            ):
+                raise RuntimeError("Coordinator reservation disappeared during retry launch.")
+    except Exception as exc:
+        with RunStore(RUNTIME / "runs.db") as store:
+            store.fail_reserved_run(
+                tag,
+                run_id=request.run_id,
+                owner_id=owner_id,
+                warning=str(exc),
+            )
+        raise HTTPException(status_code=500, detail=f"Pipeline retry failed: {exc}") from exc
+    return safe_json({"run_id": request.run_id, "job_id": owner_id})
 
 
 @app.get("/api/health")

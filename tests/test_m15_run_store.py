@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -122,6 +123,95 @@ def test_stale_dead_owner_is_reclaimed_before_lock_is_granted(tmp_path: Path) ->
     assert second.get_tag_lock("gm")["owner_id"] == "new-owner"
 
 
+def test_reserve_new_run_creates_pending_run_steps_and_lock(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs.db")
+    now = time.time()
+
+    result = store.reserve_new_run(
+        "gm",
+        run_id="run-1",
+        owner_id="job-1",
+        pid=os.getpid(),
+        config={"provider": "openrouter"},
+        step_names=["prepare", "classify"],
+        now=now,
+    )
+
+    assert result.acquired is True
+    assert store.get_run("run-1")["state"] == "pending"
+    assert [row["state"] for row in store.get_steps("run-1")] == ["pending", "pending"]
+    assert store.get_tag_lock("gm")["owner_id"] == "job-1"
+
+
+def test_second_reservation_returns_active_run_without_orphan(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs.db")
+    now = time.time()
+    first = store.reserve_new_run(
+        "gm",
+        run_id="run-1",
+        owner_id="job-1",
+        pid=os.getpid(),
+        config={},
+        step_names=["prepare"],
+        now=now,
+    )
+    second = store.reserve_new_run(
+        "gm",
+        run_id="run-2",
+        owner_id="job-2",
+        pid=os.getpid(),
+        config={},
+        step_names=["prepare"],
+        now=now + 1,
+    )
+
+    assert first.acquired is True
+    assert second.acquired is False
+    assert second.active_run_id == "run-1"
+    assert store.get_run("run-2") is None
+
+
+def test_adopt_reserved_run_requires_matching_pending_row_and_owner(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs.db")
+    now = time.time()
+    store.reserve_new_run(
+        "gm",
+        run_id="run-1",
+        owner_id="job-1",
+        pid=os.getpid(),
+        config={},
+        step_names=["prepare"],
+        now=now,
+    )
+
+    assert store.adopt_reserved_run(
+        "gm", run_id="run-1", owner_id="job-1", pid=1234, now=now + 1
+    ) is True
+    assert store.get_run("run-1")["state"] == "running"
+    assert store.get_tag_lock("gm")["pid"] == 1234
+    assert store.adopt_reserved_run(
+        "gm", run_id="missing", owner_id="job-1", pid=1234, now=now + 2
+    ) is False
+
+
+def test_reconcile_dead_pending_run_marks_failed_and_releases_lock(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs.db")
+    now = time.time()
+    store.reserve_new_run(
+        "gm",
+        run_id="run-1",
+        owner_id="job-1",
+        pid=999_999_999,
+        config={},
+        step_names=["prepare"],
+        now=now,
+    )
+
+    assert store.reconcile_pending_run("run-1", now=now + 1) is True
+    assert store.get_run("run-1")["state"] == "failed"
+    assert store.get_tag_lock("gm") is None
+
+
 def test_attempt_numbers_are_monotonic_and_steps_project_latest_attempt(tmp_path: Path) -> None:
     store = RunStore(tmp_path / "runs.db")
     store.create_run("run-1", "gm", config={})
@@ -166,7 +256,7 @@ def test_attempt_layout_and_retention_keep_logs_but_prune_old_blobs(tmp_path: Pa
 def test_invalid_run_and_step_states_are_rejected(tmp_path: Path) -> None:
     store = RunStore(tmp_path / "runs.db")
     with pytest.raises(ValueError, match="run state"):
-        store.create_run("run-1", "gm", config={}, state="pending")
+        store.create_run("run-1", "gm", config={}, state="bogus")
 
     store.create_run("run-2", "gm", config={})
     with pytest.raises(ValueError, match="step state"):

@@ -175,11 +175,20 @@ def _save_faiss_index(index: Any, path: Path) -> None:
 # KMeans
 # ---------------------------------------------------------------------------
 
+def effective_cluster_count(embeddings: np.ndarray, requested: int) -> int:
+    if len(embeddings) == 0:
+        raise ValueError("embeddings cannot be empty")
+    distinct = int(np.unique(embeddings, axis=0).shape[0])
+    return max(1, min(int(requested), len(embeddings), distinct))
+
+
 def kmeans_cluster(embeddings: np.ndarray, n_clusters: int, seed: int = 42) -> np.ndarray:
     """Run KMeans and return a cluster ID for each embedding."""
     if not HAS_SKLEARN:
         raise RuntimeError("scikit-learn is required for clustering. pip install scikit-learn")
-    actual_k = max(2, min(n_clusters, len(embeddings)))
+    actual_k = effective_cluster_count(embeddings, n_clusters)
+    if actual_k == 1:
+        return np.zeros(len(embeddings), dtype=int)
     km = _KMeans(n_clusters=actual_k, random_state=seed, n_init="auto")
     return km.fit_predict(embeddings).astype(int)
 
@@ -523,8 +532,8 @@ def run_clustering(
     # Step 3: FAISS index
     faiss_index = build_faiss_index(embeddings)
 
-    # Step 4: KMeans
-    actual_k = max(2, min(n_clusters, len(all_df_indices) // 2, len(all_df_indices)))
+    # Step 4: KMeans — cap by distinct vectors to avoid ConvergenceWarning
+    actual_k = effective_cluster_count(embeddings, max(2, min(n_clusters, len(all_df_indices) // 2)))
     cluster_assignments = kmeans_cluster(embeddings, actual_k)
 
     # Build cluster_id → list of df indices

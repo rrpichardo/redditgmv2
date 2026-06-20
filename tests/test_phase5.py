@@ -612,3 +612,16 @@ class TestTrendsResultsIncludeSignals:
         assert body["trend_summary"] is None
         for cluster in body["clusters"]:
             assert cluster["trend_signal"] == {}
+
+
+def test_trend_briefing_pdf_supports_unicode(tmp_path: Path) -> None:
+    from src.pdf_export import build_trend_briefing_pdf
+
+    output = tmp_path / "trend.pdf"
+    build_trend_briefing_pdf(
+        labels={"0": {"short_label": "Battery — charging ✓", "detailed_label": "Résumé"}},
+        examples={"0": {"examples": []}},
+        signals={"signals": {"0": {"confidence_banner": "high", "velocity": {"direction": "rising"}}}},
+        pdf_path=output,
+    )
+    assert output.read_bytes().startswith(b"%PDF")

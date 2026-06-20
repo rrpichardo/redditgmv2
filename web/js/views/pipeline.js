@@ -18,6 +18,8 @@ const STEP_LABELS = {
 
 // Terminal states — stop polling once reached.
 const TERMINAL = new Set(["completed", "completed_with_warnings", "blocked", "failed", "cancelled"]);
+let statusErrorVisible = false;
+let retryInFlight = false;
 
 const STATE_META = {
   pending: ["○", "Pending"],
@@ -126,6 +128,33 @@ function runOptionLabel(run) {
   return `${short} · ${run.state} · ${startedHuman}`;
 }
 
+function syncRunSelect() {
+  const select = $("#pipelineRunSelect");
+  if (!select) return;
+  select.innerHTML = state.pipelineRuns.length
+    ? state.pipelineRuns.map((run) =>
+        `<option value="${esc(run.run_id)}" ${run.run_id === state.pipelineRunId ? "selected" : ""}>${esc(runOptionLabel(run))}</option>`
+      ).join("")
+    : '<option value="">No runs found</option>';
+  select.value = state.pipelineRunId || "";
+}
+
+function updateCachedRun(status) {
+  const index = state.pipelineRuns.findIndex((run) => run.run_id === status.run_id);
+  const summary = {
+    run_id: status.run_id,
+    state: status.state,
+    started_at: status.started_at,
+    ended_at: status.ended_at,
+  };
+  if (index >= 0) {
+    state.pipelineRuns[index] = { ...state.pipelineRuns[index], ...summary };
+  } else {
+    state.pipelineRuns.unshift(summary);
+  }
+  syncRunSelect();
+}
+
 // ------------------------------------------------------------------
 // View template
 // ------------------------------------------------------------------
@@ -168,18 +197,11 @@ async function loadPipelineRuns() {
     const select = $("#pipelineRunSelect");
     if (!select) return; // view may have unmounted
 
-    // Re-build options.
-    select.innerHTML = state.pipelineRuns.length
-      ? state.pipelineRuns.map((run) =>
-          `<option value="${esc(run.run_id)}" ${run.run_id === state.pipelineRunId ? "selected" : ""}>${esc(runOptionLabel(run))}</option>`
-        ).join("")
-      : '<option value="">No runs found</option>';
-
     // Auto-select the first run if nothing is selected yet.
     if (!state.pipelineRunId && state.pipelineRuns.length) {
       state.pipelineRunId = state.pipelineRuns[0].run_id;
-      select.value = state.pipelineRunId;
     }
+    syncRunSelect();
 
     if (state.pipelineRunId) await loadStatus();
   } catch (err) {
@@ -192,9 +214,15 @@ async function loadStatus() {
   if (!state.pipelineRunId) return;
   try {
     const status = await request(apiUrl("/api/pipeline/status", { tag: state.tag, run_id: state.pipelineRunId }));
+    if (statusErrorVisible) {
+      setNotice();
+      statusErrorVisible = false;
+    }
+    updateCachedRun(status);
     renderStatus(status);
     managePoll(status);
   } catch (err) {
+    statusErrorVisible = true;
     setNotice(`Failed to load run status: ${err.message}`, "error");
   }
 }
@@ -300,10 +328,14 @@ async function toggleLog(stepName, runId, btn) {
 
 // POST /api/pipeline/retry for a single step.
 async function retryStep(stepName, btn) {
+  if (retryInFlight) return;
+  retryInFlight = true;
+  const retryButtons = Array.from(document.querySelectorAll(".retry-btn"));
+  retryButtons.forEach((button) => { button.disabled = true; });
   setBusy(btn, true, "Retry");
   btn.textContent = "Retrying…";
   try {
-    await request(apiUrl("/api/pipeline/retry"), {
+    const response = await fetch(apiUrl("/api/pipeline/retry"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -313,12 +345,28 @@ async function retryStep(stepName, btn) {
         api_key: state.apiKey || undefined,
       }),
     });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (response.status === 409 && body.active_run_id) {
+        state.pipelineRunId = body.active_run_id;
+        setNotice(`A run is already active (run ${body.active_run_id}).`, "warn");
+        clearPoll();
+        await loadPipelineRuns();
+        return;
+      }
+      throw new Error(body.detail || body.message || `Request failed with ${response.status}`);
+    }
     // Re-fetch status and restart polling if needed.
     clearPoll();
     await loadStatus();
   } catch (err) {
     setNotice(`Retry failed: ${err.message}`, "error");
-    setBusy(btn, false, "Retry");
+  } finally {
+    retryInFlight = false;
+    retryButtons.forEach((button) => {
+      if (button.isConnected) button.disabled = false;
+    });
+    if (btn.isConnected) setBusy(btn, false, "Retry");
   }
 }
 

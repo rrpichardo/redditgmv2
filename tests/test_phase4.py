@@ -199,6 +199,24 @@ class TestKmeansCluster:
         labels_b = kmeans_cluster(vecs, n_clusters=3, seed=0)
         np.testing.assert_array_equal(labels_a, labels_b)
 
+    def test_n_clusters_capped_at_distinct_vectors(self):
+        import warnings
+        from sklearn.exceptions import ConvergenceWarning
+        vecs = np.vstack([
+            np.ones((6, 8), dtype=np.float32),
+            -np.ones((6, 8), dtype=np.float32),
+        ])
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            labels = kmeans_cluster(vecs, n_clusters=10)
+        assert len(set(labels.tolist())) == 2
+        assert not any(isinstance(item.message, ConvergenceWarning) for item in caught)
+
+    def test_one_distinct_vector_uses_one_cluster(self):
+        vecs = np.ones((5, 8), dtype=np.float32)
+        labels = kmeans_cluster(vecs, n_clusters=10)
+        assert set(labels.tolist()) == {0}
+
 
 # ---------------------------------------------------------------------------
 # faiss_centroid_representatives
