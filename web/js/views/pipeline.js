@@ -2,6 +2,7 @@
 import { state, esc, $ } from "../state.js";
 import { apiUrl, request } from "../api.js";
 import { setNotice, setBusy } from "../components.js";
+import { loadRun } from "../app.js";
 
 // Ordered list of pipeline steps (skipped steps are still shown in order).
 const STEP_ORDER = ["prepare", "classify", "briefing", "trends", "trend_pdf", "qa_index"];
@@ -18,8 +19,17 @@ const STEP_LABELS = {
 
 // Terminal states — stop polling once reached.
 const TERMINAL = new Set(["completed", "completed_with_warnings", "blocked", "failed", "cancelled"]);
+// Terminal states that produced fresh artifacts worth showing in the other tabs.
+const SUCCESS_TERMINAL = new Set(["completed", "completed_with_warnings"]);
 let statusErrorVisible = false;
 let retryInFlight = false;
+// Run ids we've observed mid-flight (running/pending) during this session, and
+// run ids whose results we've already pushed to the rest of the app. Together
+// they ensure we refresh the Dashboard/Explorer/Trends/Q&A exactly once when a
+// watched run finishes — without re-firing when loadRun() re-renders this view
+// or when the user merely browses an already-finished run.
+const activeRunsSeen = new Set();
+const refreshedRuns = new Set();
 
 const STATE_META = {
   pending: ["○", "Pending"],
@@ -252,8 +262,13 @@ function renderStatus(status) {
 function managePoll(status) {
   const isTerminal = TERMINAL.has(status.state);
 
+  // Remember runs we've watched while still in flight so we can tell a real
+  // active→done transition apart from simply opening an old finished run.
+  if (!isTerminal) activeRunsSeen.add(status.run_id);
+
   if (isTerminal) {
     clearPoll();
+    maybeRefreshOnComplete(status);
     return;
   }
 
@@ -275,6 +290,20 @@ function clearPoll() {
     clearInterval(state.pipelinePollTimer);
     state.pipelinePollTimer = null;
   }
+}
+
+// When a watched run finishes successfully, reload the run snapshot so the
+// Dashboard, Explorer, Trends, and Q&A tabs pick up the freshly published
+// artifacts. Without this, those tabs keep showing the pre-analysis (empty)
+// state until a full page reload. loadRun() re-renders the current view, which
+// re-enters managePoll → here; the refreshedRuns guard makes that a no-op.
+async function maybeRefreshOnComplete(status) {
+  if (!SUCCESS_TERMINAL.has(status.state)) return;   // failed/blocked/cancelled → nothing new to show
+  if (!activeRunsSeen.has(status.run_id)) return;     // only react to a run we watched go active→done
+  if (refreshedRuns.has(status.run_id)) return;       // already pushed this run's results once
+  refreshedRuns.add(status.run_id);
+  await loadRun({ silent: true });                    // silent: keep our completion notice below
+  setNotice("Analysis complete — results are ready in the Dashboard, Explorer, Trends, and Q&A tabs.", "success");
 }
 
 // ------------------------------------------------------------------
