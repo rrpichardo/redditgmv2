@@ -1,17 +1,18 @@
 // nav.js — view registry, tab switching, render + ECharts mount pass, event binding.
-// Restructured for 5-tab IA: Dashboard, Data Explorer, Data Gathering, Pipeline, Settings.
+// Primary IA: Dashboard, Q&A, Data Explorer, Data Gathering, Settings.
 import { state, $, $$ } from "./state.js";
 import { mountViewCharts, disposeAll } from "./charts.js";
 import { saveExport, startExportJob, refreshExportJobStatus, loadDetailCharts } from "./app.js";
 import { dashboard, mountDashboardCharts } from "./views/dashboard.js";
 import { explorerView, bindExplorerEvents } from "./views/explore.js";
 import { gatheringView, bindGatheringEvents } from "./views/gathering.js";
-import { pipelineView, bindPipelineEvents } from "./views/pipeline.js";
+import { bindPipelineEvents, stopPipelinePolling } from "./views/pipeline.js";
 import { settingsView, bindSettingsEvents } from "./views/settings.js";
-import { bindQaEvents, stopQaPolling } from "./views/qa.js";
+import { qaView, bindQaEvents, stopQaPolling } from "./views/qa.js";
 
 export function setView(view) {
   stopQaPolling();
+  stopPipelinePolling();
   state.view = view;
   // Sync visual and accessibility state for the single active tab.
   $$(".tab").forEach((tab) => {
@@ -45,9 +46,9 @@ export function handleTabKeydown(event) {
 // Map data-view keys to render functions.
 const views = {
   dashboard,
+  qa: qaView,
   explorer: explorerView,
   gathering: gatheringView,
-  pipeline: pipelineView,
   settings: settingsView,
 };
 

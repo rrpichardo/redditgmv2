@@ -7,6 +7,7 @@ export const state = {
   view: "dashboard",
   data: null,
   report: "",
+  reportData: null,
   filters: {},
 
   // Server config (loaded from /api/config on startup)
@@ -48,6 +49,7 @@ export const state = {
   pipelineRunId: null,
   pipelinePollTimer: null,
   pipelineRuns: [],
+  settingsSection: "configuration",
 };
 
 // Shorthand DOM selectors.

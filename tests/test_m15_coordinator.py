@@ -76,6 +76,16 @@ def _successful_worker(step: str, coordinator: AnalysisCoordinator, _paths) -> S
         path = tag_root / "reports" / "gm_reddit_synthesis_report.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("# Briefing", encoding="utf-8")
+    elif step == "synthesis_pdf":
+        markdown = tag_root / "reports" / "gm_reddit_synthesis_report.md"
+        path = tag_root / "reports" / "gm_reddit_synthesis_report.pdf"
+        path.write_bytes(b"%PDF-1.4\n%%EOF")
+        return StepResult(
+            state="completed",
+            processed=1,
+            total=1,
+            artifact_paths=[markdown, path],
+        )
     elif step == "trends":
         path = tag_root / "trends" / "trend_signals.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -114,9 +124,12 @@ def test_prepare_leaves_raw_rows_pending_and_preserves_completed_rows(tmp_path: 
 
 
 def test_retry_selection_uses_dependency_map_not_linear_order() -> None:
-    assert retry_steps("briefing") == ["briefing"]
+    assert retry_steps("briefing") == ["briefing", "synthesis_pdf"]
+    assert retry_steps("synthesis_pdf") == ["synthesis_pdf"]
     assert retry_steps("trends") == ["trends", "trend_pdf"]
-    assert retry_steps("classify") == ["classify", "briefing", "trends", "trend_pdf", "qa_index"]
+    assert retry_steps("classify") == [
+        "classify", "briefing", "synthesis_pdf", "trends", "trend_pdf", "qa_index",
+    ]
 
 
 def test_scripted_run_writes_complete_ledger_logs_snapshots_and_latest(tmp_path: Path) -> None:
@@ -152,6 +165,8 @@ def test_scripted_run_writes_complete_ledger_logs_snapshots_and_latest(tmp_path:
                 assert Path(artifact["path"]).exists()
     output_root = latest_output_root(runtime_root, "gm")
     assert (output_root / "classified" / ".run_id").read_text() == "run-1"
+    assert (output_root / "reports" / "gm_reddit_synthesis_report.md").exists()
+    assert (output_root / "reports" / "gm_reddit_synthesis_report.pdf").exists()
     assert (output_root / "trends" / ".run_id").read_text() == "run-1"
     assert not (runtime_root / "gm" / "runs" / "run-1" / "staging").exists()
 
@@ -638,3 +653,46 @@ def test_retry_from_later_step_publishes_artifacts_from_prior_retries(tmp_path: 
         "briefing report must appear in the published generation"
     assert (output_root / "trends" / "trend_signals.json").exists()
     assert (output_root / "downloads").exists()
+
+
+def test_warning_complete_trend_pdf_replaces_stale_pdf_from_previous_generation(
+    tmp_path: Path,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    db_path = runtime_root / "runs.db"
+    _write_raw(runtime_root, "gm", _raw_rows(3))
+    first = AnalysisCoordinator(
+        runtime_root=runtime_root,
+        db_path=db_path,
+        tag="gm",
+        run_id="first",
+        config=_config(),
+        child_runner=_successful_worker,
+    )
+    assert first.run()["state"] == "completed"
+    assert (latest_output_root(runtime_root, "gm") / "downloads" / "gm_trend_briefing.pdf").exists()
+
+    def warning_pdf(step: str, coordinator: AnalysisCoordinator, paths) -> StepResult:
+        if step != "trend_pdf":
+            return _successful_worker(step, coordinator, paths)
+        markdown = coordinator.staging_root / coordinator.tag / "downloads" / "gm_trend_briefing.md"
+        markdown.parent.mkdir(parents=True, exist_ok=True)
+        markdown.write_text("# New markdown only", encoding="utf-8")
+        return StepResult(
+            state="completed_with_warnings",
+            warning="PDF failed",
+            artifact_paths=[markdown],
+        )
+
+    second = AnalysisCoordinator(
+        runtime_root=runtime_root,
+        db_path=db_path,
+        tag="gm",
+        run_id="second",
+        config=_config(),
+        child_runner=warning_pdf,
+    )
+    assert second.run()["state"] == "completed_with_warnings"
+    downloads = latest_output_root(runtime_root, "gm") / "downloads"
+    assert (downloads / "gm_trend_briefing.md").read_text() == "# New markdown only"
+    assert not (downloads / "gm_trend_briefing.pdf").exists()

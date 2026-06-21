@@ -107,6 +107,7 @@ def test_pipeline_status_rejects_run_from_another_tag(runtime: Path) -> None:
     ("path", "method", "payload"),
     [
         ("/api/pipeline/log?tag=beta&run_id=run-1&step=prepare", "get", None),
+        ("/api/pipeline/log/chunk?tag=beta&run_id=run-1&step=prepare", "get", None),
         ("/api/pipeline/artifact?tag=beta&run_id=run-1&step=prepare&id=0", "get", None),
         (
             "/api/pipeline/retry",
@@ -140,6 +141,66 @@ def test_pipeline_log_rejects_path_outside_run_snapshot(runtime: Path, tmp_path:
 
     assert response.status_code == 404
     assert "prepare completed" not in response.text
+
+
+def test_pipeline_log_chunks_append_from_byte_cursor_without_losing_history(
+    runtime: Path,
+) -> None:
+    _create_run(runtime, "alpha", state="running")
+    log_path, _ = _finish_attempt_with_files(runtime, "alpha", "run-1")
+    initial = "".join(f"line {index:04d}\n" for index in range(1800))
+    log_path.write_text(initial, encoding="utf-8")
+
+    first = client.get(
+        "/api/pipeline/log/chunk",
+        params={"tag": "alpha", "run_id": "run-1", "step": "prepare", "offset": 0, "max_bytes": 65536},
+    )
+    first_body = first.json()
+    assert first.status_code == 200
+    assert first_body["text"].startswith("line 0000")
+    assert len(first_body["text"]) > 12000
+    assert first_body["attempt_no"] == 1
+
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write("live append\n")
+    second = client.get(
+        "/api/pipeline/log/chunk",
+        params={
+            "tag": "alpha",
+            "run_id": "run-1",
+            "step": "prepare",
+            "offset": first_body["next_offset"],
+            "attempt_no": first_body["attempt_no"],
+        },
+    )
+
+    assert second.json()["text"] == "live append\n"
+    assert second.json()["reset"] is False
+
+
+def test_pipeline_log_chunk_resets_cursor_when_latest_attempt_changes(runtime: Path) -> None:
+    _create_run(runtime, "alpha", state="running")
+    _finish_attempt_with_files(runtime, "alpha", "run-1")
+    paths = ensure_attempt_layout(runtime, "alpha", "run-1", "prepare", 2)
+    paths.log_path.write_text("new attempt\n", encoding="utf-8")
+    with _store(runtime) as store:
+        store.start_attempt("run-1", "prepare", log_path=str(paths.log_path))
+
+    response = client.get(
+        "/api/pipeline/log/chunk",
+        params={
+            "tag": "alpha",
+            "run_id": "run-1",
+            "step": "prepare",
+            "offset": 500,
+            "attempt_no": 1,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["attempt_no"] == 2
+    assert response.json()["reset"] is True
+    assert response.json()["text"] == "new attempt\n"
 
 
 def test_pipeline_artifact_rejects_negative_index(runtime: Path) -> None:
@@ -322,6 +383,7 @@ def test_cancel_terminates_coordinator_and_active_child(runtime: Path) -> None:
     jobs = {
         "analyze": {"pid": 111, "job_id": "coordinator"},
         "classify": {"pid": 222, "job_id": "child"},
+        "synthesis_pdf": {"pid": 333, "job_id": "pdf-child"},
     }
 
     with (
@@ -337,6 +399,7 @@ def test_cancel_terminates_coordinator_and_active_child(runtime: Path) -> None:
     assert {call.args for call in kill.call_args_list} == {
         (111, app_module.signal.SIGTERM),
         (222, app_module.signal.SIGTERM),
+        (333, app_module.signal.SIGTERM),
     }
 
 
@@ -354,6 +417,12 @@ def _load_browser_with_data(page, live_server) -> None:
     )
 
 
+def _open_pipeline_settings(page) -> None:
+    page.click('.tab[data-view="settings"]')
+    page.click("#settingsPipelineTab")
+    page.wait_for_selector("#pipelineRunSelect")
+
+
 def test_tabs_follow_aria_keyboard_interaction_pattern(live_server, browser_page) -> None:
     page = browser_page
     _load_browser_with_data(page, live_server)
@@ -367,8 +436,8 @@ def test_tabs_follow_aria_keyboard_interaction_pattern(live_server, browser_page
 
     page.focus('.tab[data-view="dashboard"]')
     page.keyboard.press("ArrowRight")
-    assert page.evaluate("() => document.activeElement?.dataset?.view") == "explorer"
-    assert page.get_attribute('.tab[data-view="explorer"]', "aria-selected") == "true"
+    assert page.evaluate("() => document.activeElement?.dataset?.view") == "qa"
+    assert page.get_attribute('.tab[data-view="qa"]', "aria-selected") == "true"
     assert page.get_attribute('.tab[data-view="dashboard"]', "tabindex") == "-1"
 
     page.keyboard.press("End")
@@ -381,7 +450,7 @@ def test_active_view_controls_have_names_and_associated_labels(live_server, brow
     _load_browser_with_data(page, live_server)
 
     issues: list[dict[str, str]] = []
-    for view in ["explorer", "gathering", "pipeline", "settings"]:
+    for view in ["qa", "explorer", "gathering", "settings"]:
         page.click(f'.tab[data-view="{view}"]')
         issues.extend(
             page.eval_on_selector_all(
@@ -392,6 +461,16 @@ def test_active_view_controls_have_names_and_associated_labels(live_server, brow
                                         id: control.id, name: control.name }))""",
             )
         )
+
+    _open_pipeline_settings(page)
+    issues.extend(
+        page.eval_on_selector_all(
+            "#viewRoot input, #viewRoot select, #viewRoot textarea",
+            """(controls) => controls
+                .filter((control) => !control.name || (!control.labels?.length && !control.getAttribute('aria-label')))
+                .map((control) => ({ view: 'settings-pipeline', id: control.id, name: control.name }))""",
+        )
+    )
 
     assert issues == []
 
@@ -419,7 +498,7 @@ def test_settings_save_announces_confirmation(live_server, browser_page) -> None
     page.click("#saveConfigBtn")
 
     # New settings flow confirms inline next to the save button (not the global status bar).
-    page.wait_for_selector("#configSaveStatus")
+    page.wait_for_function("() => document.querySelector('#configSaveStatus')?.textContent.includes('Saved')")
     assert "Saved" in page.inner_text("#configSaveStatus")
 
 
@@ -549,7 +628,7 @@ def test_pipeline_status_badges_use_icon_and_text_without_injected_palette(
         ),
     )
 
-    page.click('.tab[data-view="pipeline"]')
+    _open_pipeline_settings(page)
     page.wait_for_selector('.step-card[data-step-card="classify"]')
     badge = page.locator('.step-card[data-step-card="classify"] .step-state-badge')
 
@@ -599,7 +678,7 @@ def test_pipeline_status_recovers_and_clears_stale_notice(
         )
 
     page.route("**/api/pipeline/status*", status_route)
-    page.click('.tab[data-view="pipeline"]')
+    _open_pipeline_settings(page)
     page.wait_for_selector("#statusBar .notice.error")
     assert "Run 'run-1' not found" in page.inner_text("#statusBar")
 
@@ -670,7 +749,7 @@ def test_pipeline_retry_conflict_selects_active_run(live_server, browser_page) -
         ),
     )
 
-    page.click('.tab[data-view="pipeline"]')
+    _open_pipeline_settings(page)
     page.wait_for_selector('.retry-btn[data-step="trend_pdf"]')
     page.click('.retry-btn[data-step="trend_pdf"]')
     page.wait_for_function(
@@ -679,6 +758,178 @@ def test_pipeline_retry_conflict_selects_active_run(live_server, browser_page) -
 
     assert "run run-2" in page.inner_text("#statusBar")
     assert "Request failed with 409" not in page.inner_text("#statusBar")
+
+
+def test_settings_subtabs_unmount_pipeline_and_stop_polling(live_server, browser_page) -> None:
+    page = browser_page
+    _load_browser_with_data(page, live_server)
+    page.route(
+        "**/api/pipeline/runs*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps([{"run_id": "run-1", "state": "running", "started_at": 1}]),
+        ),
+    )
+    page.route(
+        "**/api/pipeline/status*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {"run_id": "run-1", "tag": "fixture", "state": "running", "steps": []}
+            ),
+        ),
+    )
+
+    _open_pipeline_settings(page)
+    page.wait_for_selector("#pipelineRunSelect")
+    assert page.evaluate(
+        "async () => (await import('/static/js/state.js')).state.pipelinePollTimer !== null"
+    ) is True
+
+    page.click("#settingsConfigTab")
+    page.wait_for_selector("#pipelineRunSelect", state="detached")
+    assert page.locator("#pipelineRunSelect").count() == 0
+    assert page.evaluate(
+        "async () => (await import('/static/js/state.js')).state.pipelinePollTimer === null"
+    ) is True
+
+
+def test_open_pipeline_log_survives_polling_appends_live_and_preserves_scroll(
+    live_server, browser_page
+) -> None:
+    page = browser_page
+    _load_browser_with_data(page, live_server)
+    page.route(
+        "**/api/pipeline/runs*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps([{"run_id": "run-1", "state": "running", "started_at": 1}]),
+        ),
+    )
+    page.route(
+        "**/api/pipeline/status*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "run_id": "run-1",
+                    "tag": "fixture",
+                    "state": "running",
+                    "steps": [
+                        {
+                            "name": "classify",
+                            "state": "running",
+                            "processed": 1,
+                            "total": 3,
+                            "errors": 0,
+                            "error_rate": 0,
+                            "warning": None,
+                            "artifacts": [],
+                            "log_available": True,
+                        }
+                    ],
+                }
+            ),
+        ),
+    )
+    calls = {"log": 0}
+    first_text = "".join(f"line {index:03d}\n" for index in range(180))
+
+    def log_route(route) -> None:
+        calls["log"] += 1
+        if calls["log"] == 1:
+            body = {"attempt_no": 1, "text": first_text, "next_offset": len(first_text), "eof": True, "reset": False}
+        else:
+            body = {"attempt_no": 1, "text": "live append\n", "next_offset": len(first_text) + 12, "eof": True, "reset": False}
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    page.route("**/api/pipeline/log/chunk*", log_route)
+    _open_pipeline_settings(page)
+    page.wait_for_selector('.log-toggle-btn[data-step="classify"]')
+    page.click('.log-toggle-btn[data-step="classify"]')
+    page.wait_for_function("() => document.querySelector('#log-classify pre')?.textContent.includes('line 179')")
+    page.eval_on_selector("#log-classify pre", "el => { el.scrollTop = 40; }")
+    page.click("#log-classify pre", button="right")
+    page.wait_for_function("() => document.querySelector('#log-classify pre')?.textContent.includes('live append')", timeout=7000)
+
+    assert page.locator("#log-classify").get_attribute("class") == "log-panel is-open"
+    assert page.locator('.log-toggle-btn[data-step="classify"]').get_attribute("aria-expanded") == "true"
+    assert page.eval_on_selector("#log-classify pre", "el => el.scrollTop") < 100
+    assert calls["log"] >= 2
+
+
+def test_terminal_pipeline_log_drains_all_available_chunks(
+    live_server, browser_page
+) -> None:
+    page = browser_page
+    _load_browser_with_data(page, live_server)
+    page.route(
+        "**/api/pipeline/runs*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps([{"run_id": "run-1", "state": "completed", "started_at": 1}]),
+        ),
+    )
+    page.route(
+        "**/api/pipeline/status*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "run_id": "run-1",
+                    "tag": "fixture",
+                    "state": "completed",
+                    "steps": [
+                        {
+                            "name": "classify",
+                            "state": "completed",
+                            "processed": 1,
+                            "total": 1,
+                            "errors": 0,
+                            "artifacts": [],
+                            "log_available": True,
+                        }
+                    ],
+                }
+            ),
+        ),
+    )
+    calls = {"log": 0}
+
+    def log_route(route) -> None:
+        calls["log"] += 1
+        if calls["log"] == 1:
+            body = {
+                "attempt_no": 1,
+                "text": "first chunk\n",
+                "next_offset": 12,
+                "eof": False,
+                "reset": False,
+            }
+        else:
+            body = {
+                "attempt_no": 1,
+                "text": "terminal tail\n",
+                "next_offset": 26,
+                "eof": True,
+                "reset": False,
+            }
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    page.route("**/api/pipeline/log/chunk*", log_route)
+    _open_pipeline_settings(page)
+    page.click('.log-toggle-btn[data-step="classify"]')
+    page.wait_for_function(
+        "() => document.querySelector('#log-classify pre')?.textContent.includes('terminal tail')"
+    )
+
+    assert calls["log"] == 2
 
 
 def test_runtime_root_env_override(tmp_path: Path) -> None:

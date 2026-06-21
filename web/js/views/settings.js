@@ -2,11 +2,31 @@
 import { state, esc } from "../state.js";
 import { request, apiUrl } from "../api.js";
 import { setNotice } from "../components.js";
+import { pipelineView, stopPipelinePolling } from "./pipeline.js";
 
 // ---------------------------------------------------------------------------
 // Render
 // ---------------------------------------------------------------------------
 export function settingsView() {
+  const pipelineActive = state.settingsSection === "pipeline";
+  return `
+    <div class="settings-hub">
+      <div class="settings-subtabs" role="tablist" aria-label="Settings sections">
+        <button id="settingsConfigTab" class="settings-subtab ${pipelineActive ? "" : "is-active"}"
+          type="button" role="tab" aria-selected="${pipelineActive ? "false" : "true"}"
+          aria-controls="settingsSectionPanel" data-settings-section="configuration">Configuration</button>
+        <button id="settingsPipelineTab" class="settings-subtab ${pipelineActive ? "is-active" : ""}"
+          type="button" role="tab" aria-selected="${pipelineActive ? "true" : "false"}"
+          aria-controls="settingsSectionPanel" data-settings-section="pipeline">Pipeline runs</button>
+      </div>
+      <section id="settingsSectionPanel" role="tabpanel"
+        aria-labelledby="${pipelineActive ? "settingsPipelineTab" : "settingsConfigTab"}">
+        ${pipelineActive ? pipelineView() : configurationView()}
+      </section>
+    </div>`;
+}
+
+function configurationView() {
   const cfg = state.config || {};
   const p   = cfg.provider   || {};
   const col = cfg.collection || {};
@@ -171,6 +191,16 @@ export async function loadConfig() {
 // Bind events
 // ---------------------------------------------------------------------------
 export function bindSettingsEvents() {
+  document.querySelectorAll("[data-settings-section]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const section = button.dataset.settingsSection;
+      if (!section || section === state.settingsSection) return;
+      if (section !== "pipeline") stopPipelinePolling();
+      state.settingsSection = section;
+      const { render } = await import("../nav.js");
+      render();
+    });
+  });
   document.getElementById("saveConfigBtn")?.addEventListener("click", saveConfig);
   document.getElementById("validateClusterPromptBtn")?.addEventListener("click", validateClusterPrompt);
   document.getElementById("resetClusterPromptBtn")?.addEventListener("click", resetClusterPrompt);

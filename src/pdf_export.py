@@ -528,6 +528,27 @@ def build_briefing_pdf(
     return pdf_path
 
 
+def build_synthesis_pdf_artifact(
+    classified_path: Path,
+    report_text: str,
+    pdf_path: Path,
+    charts_dir: Path,
+) -> Path:
+    """Render dashboard charts and package them with one synthesis narrative."""
+    from src.charts import build_chart_payload
+    from src.gm_insights import filter_analyzed, load_classified, summary_payload
+
+    frame = load_classified(Path(classified_path))
+    selected = filter_analyzed(frame, {}) if not frame.empty else frame
+    payload = build_chart_payload(selected)
+    png_paths = render_all_charts(
+        payload["chart_specs"], payload["chart_data"], Path(charts_dir)
+    )
+    summary = summary_payload(selected) if not selected.empty else {}
+    Path(pdf_path).parent.mkdir(parents=True, exist_ok=True)
+    return build_briefing_pdf(png_paths, summary, report_text, Path(pdf_path))
+
+
 # ---------------------------------------------------------------------------
 # Trend briefing PDF (Phase 5)
 # ---------------------------------------------------------------------------

@@ -40,6 +40,9 @@ GET /api/pipeline/runs?tag=&limit=
 GET /api/pipeline/log?tag=&run_id=&step=
   200:  text/plain (tail of the step log)
 
+GET /api/pipeline/log/chunk?tag=&run_id=&step=&offset=&attempt_no=
+  200:  { attempt_no, text, next_offset, eof, reset } # cursor-based live log reads
+
 GET /api/pipeline/artifact?tag=&run_id=&step=&id=
   200:  immutable per-attempt artifact bytes
   404:  missing artifact/run/step; path traversal and non-snapshot paths are rejected
@@ -56,13 +59,15 @@ POST /api/pipeline/retry
 **Canonical ordered execution list** (sequential, hardcoded for V1):
 
 ```
-["prepare", "classify", "briefing", "trends", "trend_pdf", "qa_index"]
+["prepare", "classify", "briefing", "synthesis_pdf", "trends", "trend_pdf", "qa_index"]
 ```
 
 - `prepare` — normalize upload into a working set while leaving analyzable rows pending
   (`classifier_mode=""`); preserve rows already marked `llm`/`imported`; evaluate run/step guards.
 - `classify` — `scripts/classify_job.py`.
 - `briefing` — thin `scripts/briefing_job.py` over `src/gm_insights.py` synthesis.
+- `synthesis_pdf` — warning-capable `scripts/synthesis_pdf_job.py`; publishes Markdown
+  plus PDF when rendering succeeds and Markdown alone when PDF rendering fails.
 - `trends` — clustering **and** trend signals (one worker: `scripts/trend_job.py`).
 - `trend_pdf` — `scripts/trend_briefing_job.py`.
 - `qa_index` — `scripts/faiss_qa_job.py`.
@@ -73,12 +78,14 @@ display order:
 ```
 prepare  -> classify
 classify -> briefing, trends, qa_index
+briefing -> synthesis_pdf
 trends   -> trend_pdf
 ```
 
 Retry re-runs the selected step plus only its transitive dependents. For example, retrying `briefing`
-re-runs only `briefing`; retrying `classify` also re-runs `briefing`, `trends`, `trend_pdf`, and
-`qa_index`; retrying `trends` also re-runs `trend_pdf`. This is a hardcoded map, not a DAG engine.
+re-runs `briefing` and `synthesis_pdf`; retrying `classify` also re-runs `briefing`,
+`synthesis_pdf`, `trends`, `trend_pdf`, and `qa_index`; retrying `trends` also re-runs
+`trend_pdf`. This is a hardcoded map, not a DAG engine.
 
 API keys use request override first and the provider environment variable second. Keys are passed to
 workers through their environment only and are never persisted in run config, SQLite, logs, or files.

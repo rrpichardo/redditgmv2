@@ -143,7 +143,7 @@ async function pollQaStatus(jobId = "") {
     const params = jobId ? { tag: state.tag, job_id: jobId } : { tag: state.tag };
     const status = await request(apiUrl("/api/qa/status", params));
     state.qaJobStatus = status;
-    if (state.view === "dashboard") render();
+    if (state.view === "qa") render();
     const done = ["ready", "failed", "stale", "missing", "blocked_no_api_key"].includes(status.state);
     if (done) {
       stopQaPolling();
@@ -162,7 +162,7 @@ export async function refreshQaStatus() {
   try {
     const status = await request(apiUrl("/api/qa/status", { tag: state.tag }));
     state.qaJobStatus = status;
-    if (state.view === "dashboard") render();
+    if (state.view === "qa") render();
     if (status.state === "building") startQaPolling(status.job_id);
   } catch (error) {
     setNotice(error.message, "error");
@@ -190,7 +190,7 @@ export async function startQaBuildIndex() {
     state.qaJobStatus = { ...status, state: "building" };
     state.qaHits = null;
     state.qaAnswer = null;
-    if (state.view === "dashboard") render();
+    if (state.view === "qa") render();
     if (["running", "pending"].includes(status.state)) {
       setNotice("Index build started.");
       startQaPolling(status.job_id);
@@ -223,7 +223,7 @@ export async function submitQaQuestion() {
     });
     state.qaHits = result.hits || [];
     state.qaAnswer = result.answer || "";
-    if (state.view === "dashboard") render();
+    if (state.view === "qa") render();
   } catch (error) {
     setNotice(error.message, "error");
   } finally {
@@ -253,7 +253,7 @@ export async function submitQaSearch() {
     });
     state.qaHits = result.hits || [];
     state.qaAnswer = null;
-    if (state.view === "dashboard") render();
+    if (state.view === "qa") render();
   } catch (error) {
     setNotice(error.message, "error");
   } finally {

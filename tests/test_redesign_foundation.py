@@ -22,10 +22,10 @@ def test_api_run_serves_chart_payload(live_server):
 def test_index_serves_five_tabs(live_server):
     # M1 IA restructure: 7 tabs → 5 tabs; no left rail.
     html = _get(f"{live_server.url}/")
-    for view in ["dashboard", "explorer", "gathering", "pipeline", "settings"]:
+    for view in ["dashboard", "qa", "explorer", "gathering", "settings"]:
         assert f'data-view="{view}"' in html, f"tab {view} missing from index.html"
     # Old tabs must be gone.
-    for old_view in ["collect", "classify", "briefing", "trends", "qa"]:
+    for old_view in ["collect", "classify", "briefing", "trends", "pipeline"]:
         assert f'data-view="{old_view}"' not in html, f"old tab {old_view} still present in index.html"
     # Left rail must be gone.
     assert 'class="rail"' not in html, "left rail still present in index.html"
@@ -155,9 +155,11 @@ def test_all_tabs_no_console_errors(live_server, browser_page):
     page.on("pageerror", lambda e: errors.append(str(e)))
     page.on("response", lambda r: failed_responses.append(f"{r.status} {r.url}") if r.status >= 400 else None)
     _load_app_with_data(page, live_server)
-    for view in ["dashboard", "explorer", "gathering", "pipeline", "settings"]:
+    for view in ["dashboard", "qa", "explorer", "gathering", "settings"]:
         page.click(f'.tab[data-view="{view}"]')
         page.wait_for_timeout(500)  # give each tab time to settle
+    page.click("#settingsPipelineTab")
+    page.wait_for_selector("#pipelineRunSelect")
     assert errors == [], f"console/page errors: {errors}; failed responses: {failed_responses}"
 
 

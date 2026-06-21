@@ -138,18 +138,19 @@ export async function analyzeData() {
       const err = await res.json().catch(() => ({}));
       if (res.status === 409) {
         const conflict = err.detail || err;
-        setNotice(`A run is already active (run ${conflict.active_run_id || "unknown"}). Check the Pipeline tab.`, "warn");
+        setNotice(`A run is already active (run ${conflict.active_run_id || "unknown"}). Check Settings → Pipeline runs.`, "warn");
       } else {
-        setNotice("Failed to start analysis. Check the Pipeline tab for details.", "error");
+        setNotice("Failed to start analysis. Check Settings → Pipeline runs for details.", "error");
       }
       return;
     }
     const data = await res.json();
     state.pipelineRunId = data.run_id;
-    setNotice(`Analysis started (run ${data.run_id}). Watch progress in the Pipeline tab.`, "success");
-    // Navigate to Pipeline so the user can watch progress.
+    setNotice(`Analysis started (run ${data.run_id}). Watch progress in Settings → Pipeline runs.`, "success");
+    // Navigate to the nested pipeline monitor so the user can watch progress.
     const { setView } = await import("../nav.js");
-    setView("pipeline");
+    state.settingsSection = "pipeline";
+    setView("settings");
   } finally {
     setBusy(btn, false, "Analyze data");
   }

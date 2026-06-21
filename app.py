@@ -101,7 +101,14 @@ def resolve_legacy_root(env: Mapping[str, str] | None = None) -> Path | None:
 LEGACY_ROOT = resolve_legacy_root()
 DEFAULT_TAG = "gm_vehicle_on_demand"
 COLLECT_JOBS: dict[str, dict[str, Any]] = {}
-PIPELINE_CHILD_JOB_KINDS = ("classify", "briefing", "trend", "trend_briefing", "faiss_qa")
+PIPELINE_CHILD_JOB_KINDS = (
+    "classify",
+    "briefing",
+    "synthesis_pdf",
+    "trend",
+    "trend_briefing",
+    "faiss_qa",
+)
 
 PROVIDERS = {
     "openrouter": {
@@ -345,6 +352,10 @@ def report_path(tag: str) -> Path:
     return output_dir(tag) / "reports" / "gm_reddit_synthesis_report.md"
 
 
+def report_pdf_path(tag: str) -> Path:
+    return output_dir(tag) / "reports" / "gm_reddit_synthesis_report.pdf"
+
+
 def collect_log_path(tag: str) -> Path:
     return run_dir(tag) / "collect" / "latest.log"
 
@@ -452,6 +463,7 @@ def build_data_bundle(tag: str) -> Path:
         (data_dir(clean) / "gm_comments.csv", "data/gm_comments.csv"),
         (classified_path(clean), "classified/classified_posts.csv"),
         (report_path(clean), "reports/gm_reddit_synthesis_report.md"),
+        (report_pdf_path(clean), "reports/gm_reddit_synthesis_report.pdf"),
         (manifest_path(clean), "runs/run_manifest.jsonl"),
     ]
     existing = [(path, arcname) for path, arcname in members if path.exists()]
@@ -679,6 +691,7 @@ def run_snapshot(tag: str, filters: dict[str, Any] | None = None) -> dict[str, A
             "has_source": not load_runtime_frame(data_dir(tag)).empty,
             "has_classified": classified_path(tag).exists(),
             "has_report": report_path(tag).exists(),
+            "has_report_pdf": report_pdf_path(tag).exists(),
             "legacy_collector_configured": LEGACY_ROOT is not None,
             "legacy_collector_found": bool(LEGACY_ROOT and LEGACY_ROOT.exists()),
             "source_files": source_download_entries(tag),
@@ -1302,6 +1315,34 @@ def download_report(tag: str = DEFAULT_TAG) -> Response:
     return FileResponse(path, media_type="text/markdown", filename=f"{clean_tag(tag)}_gm_reddit_strategy_briefing.md")
 
 
+@app.get("/api/reports/preview")
+def reports_preview(tag: str = DEFAULT_TAG) -> JSONResponse:
+    """Return Markdown previews and format readiness from one published generation."""
+    clean = clean_tag(tag)
+    root = output_dir(clean)
+    synthesis_md = root / "reports" / "gm_reddit_synthesis_report.md"
+    synthesis_pdf = root / "reports" / "gm_reddit_synthesis_report.pdf"
+    trend_md = root / "downloads" / f"{clean}_trend_briefing.md"
+    trend_pdf = root / "downloads" / f"{clean}_trend_briefing.pdf"
+
+    def payload(markdown: Path, pdf: Path) -> dict[str, object]:
+        return {
+            "markdown": markdown.read_text(encoding="utf-8") if markdown.is_file() else "",
+            "formats": {
+                "markdown": "ready" if markdown.is_file() else "missing",
+                "pdf": "ready" if pdf.is_file() else "missing",
+            },
+        }
+
+    return safe_json(
+        {
+            "tag": clean,
+            "synthesis": payload(synthesis_md, synthesis_pdf),
+            "trend": payload(trend_md, trend_pdf),
+        }
+    )
+
+
 @app.get("/api/download/charts")
 def download_charts(tag: str = DEFAULT_TAG) -> Response:
     """Download the charts ZIP produced by a completed pdf_export job."""
@@ -1317,13 +1358,13 @@ def download_charts(tag: str = DEFAULT_TAG) -> Response:
 
 @app.get("/api/download/briefing-pdf")
 def download_briefing_pdf(tag: str = DEFAULT_TAG) -> Response:
-    """Download the briefing PDF produced by a completed pdf_export job."""
+    """Download the synthesis PDF from the atomically published generation."""
     clean = clean_tag(tag)
-    path = run_dir(clean) / "downloads" / f"{clean}_briefing.pdf"
+    path = report_pdf_path(clean)
     if not path.exists():
         raise HTTPException(
             status_code=404,
-            detail="Briefing PDF not ready. Start an export job with kind=briefing first.",
+            detail="No synthesis briefing PDF exists for the current generation.",
         )
     return FileResponse(
         path, media_type="application/pdf",
@@ -1877,6 +1918,49 @@ def pipeline_log(tag: str = DEFAULT_TAG, run_id: str = "", step: str = "") -> Re
         raise HTTPException(status_code=404, detail="Log file not found.")
     text = tail_text(safe_log_path)
     return Response(content=text, media_type="text/plain")
+
+
+@app.get("/api/pipeline/log/chunk")
+def pipeline_log_chunk(
+    tag: str = DEFAULT_TAG,
+    run_id: str = "",
+    step: str = "",
+    offset: int = Query(default=0, ge=0),
+    attempt_no: int = Query(default=0, ge=0),
+    max_bytes: int = Query(default=65536, ge=1, le=262144),
+) -> JSONResponse:
+    """Return an append-only byte range from the latest immutable attempt log."""
+    tag = clean_tag(tag)
+    with RunStore(RUNTIME / "runs.db") as store:
+        require_pipeline_run(store, tag, run_id)
+        attempts = store.get_attempts(run_id, step)
+    if not attempts:
+        raise HTTPException(status_code=404, detail=f"No attempts found for {run_id}/{step}.")
+    latest = attempts[-1]
+    latest_attempt = int(latest.get("attempt_no") or len(attempts))
+    log_path = latest.get("log_path")
+    if not log_path:
+        raise HTTPException(status_code=404, detail="Log file not found.")
+    safe_log_path = require_snapshot_path(tag, run_id, log_path)
+    if not safe_log_path.is_file():
+        raise HTTPException(status_code=404, detail="Log file not found.")
+
+    size = safe_log_path.stat().st_size
+    reset = bool((attempt_no and attempt_no != latest_attempt) or offset > size)
+    start = 0 if reset else offset
+    with safe_log_path.open("rb") as handle:
+        handle.seek(start)
+        data = handle.read(max_bytes)
+        next_offset = handle.tell()
+    return safe_json(
+        {
+            "attempt_no": latest_attempt,
+            "text": data.decode("utf-8", errors="replace"),
+            "next_offset": next_offset,
+            "eof": next_offset >= size,
+            "reset": reset,
+        }
+    )
 
 
 @app.get("/api/pipeline/artifact")

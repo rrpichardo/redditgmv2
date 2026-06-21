@@ -196,3 +196,71 @@ def test_report_download_links_are_independent() -> None:
     for source in (trends_source, dashboard_source):
         assert "/api/download/trend-md" in source
         assert "/api/download/trend-pdf" in source
+
+
+def test_report_preview_and_synthesis_pdf_download_use_current_generation_only(
+    tmp_path: Path,
+) -> None:
+    import app as app_module
+
+    original_runtime = app_module.RUNTIME
+    app_module.RUNTIME = tmp_path
+    generation = tmp_path / "gm" / "generations" / "generation-8"
+    reports = generation / "reports"
+    downloads = generation / "downloads"
+    reports.mkdir(parents=True)
+    downloads.mkdir(parents=True)
+    (reports / "gm_reddit_synthesis_report.md").write_text("# Current synthesis", encoding="utf-8")
+    (reports / "gm_reddit_synthesis_report.pdf").write_bytes(b"%PDF-current\n%%EOF")
+    (downloads / "gm_trend_briefing.md").write_text("# Current trends", encoding="utf-8")
+    (tmp_path / "gm" / "current").symlink_to(generation, target_is_directory=True)
+    legacy = tmp_path / "gm" / "downloads"
+    legacy.mkdir(parents=True)
+    (legacy / "gm_briefing.pdf").write_bytes(b"%PDF-stale\n%%EOF")
+    try:
+        client = TestClient(app_module.app)
+        preview = client.get("/api/reports/preview", params={"tag": "gm"})
+        pdf = client.get("/api/download/briefing-pdf", params={"tag": "gm"})
+    finally:
+        app_module.RUNTIME = original_runtime
+
+    assert preview.status_code == 200
+    assert preview.json() == {
+        "tag": "gm",
+        "synthesis": {
+            "markdown": "# Current synthesis",
+            "formats": {"markdown": "ready", "pdf": "ready"},
+        },
+        "trend": {
+            "markdown": "# Current trends",
+            "formats": {"markdown": "ready", "pdf": "missing"},
+        },
+    }
+    assert pdf.status_code == 200
+    assert pdf.content == b"%PDF-current\n%%EOF"
+
+
+def test_old_generation_without_synthesis_pdf_does_not_fall_back_to_live_download(
+    tmp_path: Path,
+) -> None:
+    import app as app_module
+
+    original_runtime = app_module.RUNTIME
+    app_module.RUNTIME = tmp_path
+    generation = tmp_path / "gm" / "generations" / "generation-old"
+    reports = generation / "reports"
+    reports.mkdir(parents=True)
+    (reports / "gm_reddit_synthesis_report.md").write_text("# Markdown only", encoding="utf-8")
+    (tmp_path / "gm" / "current").symlink_to(generation, target_is_directory=True)
+    legacy = tmp_path / "gm" / "downloads"
+    legacy.mkdir(parents=True)
+    (legacy / "gm_briefing.pdf").write_bytes(b"%PDF-stale\n%%EOF")
+    try:
+        client = TestClient(app_module.app)
+        preview = client.get("/api/reports/preview", params={"tag": "gm"})
+        pdf = client.get("/api/download/briefing-pdf", params={"tag": "gm"})
+    finally:
+        app_module.RUNTIME = original_runtime
+
+    assert preview.json()["synthesis"]["formats"]["pdf"] == "missing"
+    assert pdf.status_code == 404
