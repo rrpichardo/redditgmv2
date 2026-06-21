@@ -2,7 +2,7 @@ import json
 import os
 import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
@@ -106,6 +106,105 @@ def test_classify_writes_redacted_row_errors_to_staging(tmp_path: Path) -> None:
     assert "private customer evidence" not in errors_path.read_text(encoding="utf-8")
     assert status["errors"] == 1
     assert str(errors_path) in status["artifact_paths"]
+
+
+def test_classify_with_llm_bounds_request_time(monkeypatch) -> None:
+    # A stalled provider request must be cut off, never waited on forever.
+    # The OpenAI client is built with an explicit request timeout and with the
+    # SDK's own retries disabled (so the timeout isn't silently multiplied).
+    from src.gm_insights import classify_with_llm
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    provider = ProviderConfig(
+        provider="openai",
+        model="gpt-test",
+        base_url="https://example.test/v1",
+        api_key_env="OPENAI_API_KEY",
+        api_key="",
+    )
+
+    # Fake client whose create() returns a parseable JSON label
+    fake_client = MagicMock()
+    message = MagicMock()
+    message.content = '{"sentiment": "neutral"}'
+    fake_client.chat.completions.create.return_value.choices = [MagicMock(message=message)]
+
+    with patch("openai.OpenAI", return_value=fake_client) as ctor:
+        classify_with_llm("a comment to classify", provider)
+
+    # The constructor must receive a finite timeout and no hidden SDK retries
+    assert ctor.call_args.kwargs.get("timeout") == 30
+    assert ctor.call_args.kwargs.get("max_retries") == 0
+
+
+def test_generate_synthesis_bounds_request_time(monkeypatch) -> None:
+    # The briefing worker makes one long blocking LLM call with no heartbeat
+    # during it, so a stalled request would freeze the worker past the 120s
+    # liveness budget. The call must be bounded (generous, but under budget).
+    from src.gm_insights import generate_synthesis_with_llm
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    provider = ProviderConfig(
+        provider="openai",
+        model="gpt-test",
+        base_url="https://example.test/v1",
+        api_key_env="OPENAI_API_KEY",
+        api_key="",
+    )
+
+    fake_client = MagicMock()
+    message = MagicMock()
+    message.content = "# Briefing"
+    fake_client.chat.completions.create.return_value.choices = [MagicMock(message=message)]
+
+    with patch("openai.OpenAI", return_value=fake_client) as ctor:
+        generate_synthesis_with_llm({"metrics": {}}, provider)
+
+    assert ctor.call_args.kwargs.get("timeout") == 90
+    assert ctor.call_args.kwargs.get("max_retries") == 0
+
+
+def test_classify_job_heartbeats_after_each_row(tmp_path: Path) -> None:
+    # The worker must check in after EVERY row, not only once per 10-row chunk,
+    # so a slow-but-alive request can't let the heartbeat go stale and get the
+    # worker killed as "interrupted".
+    runtime_root = tmp_path / "runtime"
+    output_root = tmp_path / "staging"
+    frame = normalize_reddit_frame(
+        pd.DataFrame(
+            [
+                {
+                    "id": f"r{i}",
+                    "title": f"Sufficiently long classification row number {i}",
+                    "selftext": f"Row body number {i} with enough evidence to classify.",
+                    "subreddit": "gm",
+                }
+                for i in range(3)
+            ]
+        )
+    )
+    classified = output_root / "gm" / "classified" / "classified_posts.csv"
+    save_classified(frame, classified)
+
+    # Capture every status write so we can see the heartbeat cadence
+    heartbeats: list[dict] = []
+
+    with (
+        patch("scripts.classify_job.classify_with_llm", return_value={}),
+        patch("scripts.classify_job.write_status", side_effect=lambda path, fields: heartbeats.append(fields)),
+    ):
+        run_classify_job(
+            tag="gm",
+            job_id="classify-hb",
+            runtime_root=runtime_root,
+            classified_path=classified,
+            provider=_provider(),
+            output_root=output_root,
+        )
+
+    # One heartbeat carrying progress per row: 1, then 2, then 3 (not a single 0->3 jump)
+    progress = [f["processed"] for f in heartbeats if "heartbeat_at" in f and "processed" in f]
+    assert progress == [1, 2, 3]
 
 
 def test_trend_worker_uses_output_root_but_keeps_status_in_runtime(tmp_path: Path) -> None:

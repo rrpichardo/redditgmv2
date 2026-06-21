@@ -583,7 +583,10 @@ def classify_with_llm(text: str, provider: ProviderConfig, max_retries: int = 2)
     if not api_key:
         raise RuntimeError(f"Missing API key. Set {provider.api_key_env} or enter a key in the app.")
 
-    client = OpenAI(api_key=api_key, base_url=provider.base_url)
+    # Cap each request at 30s so a stalled provider call can't hang the worker
+    # forever; disable the SDK's own retries so our loop below is the only one
+    # (otherwise the effective wait is silently multiplied past the heartbeat budget).
+    client = OpenAI(api_key=api_key, base_url=provider.base_url, timeout=30, max_retries=0)
     for attempt in range(max_retries + 1):
         try:
             response = client.chat.completions.create(
@@ -1121,7 +1124,10 @@ def generate_synthesis_with_llm(payload: dict[str, Any], provider: ProviderConfi
     api_key = provider.api_key or os.getenv(provider.api_key_env, "")
     if not api_key:
         raise RuntimeError(f"Missing API key. Set {provider.api_key_env} or enter a key in the app.")
-    client = OpenAI(api_key=api_key, base_url=provider.base_url)
+    # Bound this single blocking call so a stalled provider can't freeze the
+    # briefing worker past the 120s liveness budget. 90s (vs classify's 30s)
+    # leaves room for a full multi-section report while staying under budget.
+    client = OpenAI(api_key=api_key, base_url=provider.base_url, timeout=90, max_retries=0)
     response = client.chat.completions.create(
         model=provider.model,
         messages=[
