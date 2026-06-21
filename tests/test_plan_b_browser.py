@@ -54,6 +54,14 @@ def test_dashboard_groups_predefined_and_discovered_charts() -> None:
     assert 'chartPanel("vehicles"' in source
 
 
+def test_primary_navigation_promotes_qa_and_removes_pipeline_tab() -> None:
+    source = _source("web/index.html")
+
+    assert source.index('data-view="dashboard"') < source.index('data-view="qa"')
+    assert source.index('data-view="qa"') < source.index('data-view="explorer"')
+    assert 'data-view="pipeline"' not in source
+
+
 def test_qa_is_no_longer_composed_inside_explorer() -> None:
     source = _source("web/js/views/explore.js")
 
@@ -230,6 +238,41 @@ def test_collect_list_editor_creates_and_uses_named_list(live_server, browser_pa
     assert "since_days" not in collect_payload
 
 
+def test_analyze_navigates_to_pipeline_runs_inside_settings(live_server, browser_page) -> None:
+    page = browser_page
+    page.route(
+        "**/api/analyze",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"run_id": "new-run", "job_id": "job-1"}),
+        ),
+    )
+    page.route(
+        "**/api/pipeline/runs*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps([{"run_id": "new-run", "state": "running", "started_at": 1}]),
+        ),
+    )
+    page.route(
+        "**/api/pipeline/status*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"run_id": "new-run", "state": "running", "steps": []}),
+        ),
+    )
+    _load_browser_with_data(page, live_server)
+    page.click('.tab[data-view="gathering"]')
+    page.click("#analyzeBtn")
+    page.wait_for_selector("#settingsPipelineTab[aria-selected='true']")
+
+    assert page.locator('.tab[data-view="settings"]').get_attribute("aria-selected") == "true"
+    assert page.locator("#pipelineRunSelect").count() == 1
+
+
 def test_cluster_prompt_preview_and_reset_are_interactive(live_server, browser_page) -> None:
     page = browser_page
     default_prompt = "Default prompt with every required placeholder and JSON contract"
@@ -267,10 +310,11 @@ def test_cluster_prompt_preview_and_reset_are_interactive(live_server, browser_p
 
     page.click("#resetClusterPromptBtn")
     page.wait_for_function(f"() => document.querySelector('#cfg-prompt-cluster')?.value === {json.dumps(default_prompt)}")
+    page.wait_for_function("() => document.querySelector('#clusterPromptValidation')?.textContent === 'Prompt is valid.'")
     assert page.inner_text("#clusterPromptValidation") == "Prompt is valid."
 
 
-def test_qa_recovery_is_on_dashboard_and_polling_stops_on_navigation(live_server, browser_page) -> None:
+def test_qa_recovery_is_on_standalone_tab_and_polling_stops_on_navigation(live_server, browser_page) -> None:
     page = browser_page
 
     page.route(
@@ -296,6 +340,9 @@ def test_qa_recovery_is_on_dashboard_and_polling_stops_on_navigation(live_server
     )
     _load_browser_with_data(page, live_server)
 
+    assert page.get_by_role("heading", name="Ask your evidence").count() == 0
+    page.click('.tab[data-view="qa"]')
+
     assert page.get_by_role("heading", name="Ask your evidence").count() == 1
     assert page.get_by_role("button", name="Rebuild for current data").count() == 1
     assert page.locator('.tab[data-view="explorer"]').get_attribute("aria-selected") == "false"
@@ -304,3 +351,66 @@ def test_qa_recovery_is_on_dashboard_and_polling_stops_on_navigation(live_server
     assert page.evaluate("async () => (await import('/static/js/state.js')).state.qaPollTimer !== null") is True
     page.click('.tab[data-view="explorer"]')
     assert page.evaluate("async () => (await import('/static/js/state.js')).state.qaPollTimer === null") is True
+
+
+def test_dashboard_report_previews_are_sanitized_and_follow_approved_order(
+    live_server, browser_page
+) -> None:
+    page = browser_page
+    page.route(
+        "**/api/reports/preview*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "tag": live_server.tag,
+                    "synthesis": {
+                        "markdown": "# Synthesis\n\n**Priority** <script>window.reportXss=1</script>",
+                        "formats": {"markdown": "ready", "pdf": "ready"},
+                    },
+                    "trend": {
+                        "markdown": "# Trend report\n\n**Signals to watch**",
+                        "formats": {"markdown": "ready", "pdf": "ready"},
+                    },
+                }
+            ),
+        ),
+    )
+    _load_browser_with_data(page, live_server)
+    page.evaluate(
+        """async () => {
+            const { state } = await import('/static/js/state.js');
+            state.trendsData = {
+                ok: true,
+                clusters: [{
+                    cluster_id: 1,
+                    cluster_size: 4,
+                    label: { short_label: 'Brake vibration' },
+                    trend_signal: {
+                        confidence_banner: 'medium',
+                        velocity: { valid: true, direction: 'rising', velocity: 0.2 },
+                        zscore: { valid: true, direction: 'stable', zscore: 0.4 },
+                    },
+                }],
+            };
+            const { setView } = await import('/static/js/nav.js');
+            setView('dashboard');
+        }"""
+    )
+
+    assert page.locator("#synthesisReportPreview strong", has_text="Priority").count() == 1
+    assert page.locator("#synthesisReportPreview script").count() == 0
+    assert page.evaluate("() => window.reportXss") is None
+    order = page.evaluate(
+        """() => ({
+            synthesis: document.querySelector('#synthesisReportCard').compareDocumentPosition(
+                document.querySelector('[data-chart="sentiment"]')),
+            trendAfterSignals: document.querySelector('[data-signal-grid]').compareDocumentPosition(
+                document.querySelector('#trendReportCard')),
+            trendBeforeCharts: document.querySelector('#trendReportCard').compareDocumentPosition(
+                document.querySelector('#quadrantChart')),
+        })"""
+    )
+    assert order == {"synthesis": 4, "trendAfterSignals": 4, "trendBeforeCharts": 4}
+    assert page.locator(".report-preview-scroll").count() == 2

@@ -7,7 +7,7 @@ import {
   buildQuadrantOption, buildLeaderboardOption,
   buildLineTimeseriesOption, buildStackedAreaOption,
 } from "../charts.js";
-import { qaView } from "./qa.js";
+import { renderSafeMarkdown } from "../markdown.js";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -57,6 +57,40 @@ function hasRising(clusters) {
 
 function trendEmptyState(detail) {
   return `<div class="notice">${esc(detail || "This chart needs more dated records.")}</div>`;
+}
+
+function reportCard(kind, title, cardId, previewId) {
+  const report = state.reportData?.[kind] || {};
+  const formats = report.formats || {};
+  const markdownReady = formats.markdown === "ready" && Boolean(report.markdown);
+  const pdfReady = formats.pdf === "ready";
+  const tag = encodeURIComponent(state.tag);
+  const markdownHref = kind === "synthesis"
+    ? `/api/download/report?tag=${tag}`
+    : `/api/download/trend-md?tag=${tag}`;
+  const pdfHref = kind === "synthesis"
+    ? `/api/download/briefing-pdf?tag=${tag}`
+    : `/api/download/trend-pdf?tag=${tag}`;
+  const warning = kind === "trend" ? state.trendBriefingJobStatus?.warning : "";
+
+  return `<section id="${cardId}" class="panel report-preview-card" aria-labelledby="${cardId}Title">
+    <div class="panel-head report-preview-head">
+      <div>
+        <span class="report-preview-kicker">Published report</span>
+        <h3 id="${cardId}Title">${esc(title)}</h3>
+      </div>
+      <div class="report-preview-actions" aria-label="${esc(title)} downloads">
+        ${markdownReady ? `<a class="export-chip" href="${markdownHref}">Markdown</a>` : `<span class="export-chip is-disabled">Markdown unavailable</span>`}
+        ${pdfReady ? `<a class="export-chip" href="${pdfHref}">PDF</a>` : `<span class="export-chip is-disabled">PDF unavailable</span>`}
+      </div>
+    </div>
+    ${warning ? `<div class="notice" role="status">${esc(warning)}</div>` : ""}
+    <div id="${previewId}" class="report-preview-scroll">
+      ${markdownReady
+        ? `<article class="report-markdown">${renderSafeMarkdown(report.markdown)}</article>`
+        : `<div class="report-preview-empty"><strong>No report published yet.</strong><span>Run the analysis pipeline to generate this briefing.</span></div>`}
+    </div>
+  </section>`;
 }
 
 // ── Signals section ──────────────────────────────────────────────────────────
@@ -260,21 +294,8 @@ export function dashboard() {
   const granularityLabel = tsd?.granularity_label || "time-bucketed";
   // Only show signals section when trends have been fetched and returned clusters.
   const clusters = td?.ok && td.clusters?.length ? td.clusters : null;
-  const reportStatus = state.trendBriefingJobStatus;
-  const reportTag = encodeURIComponent(state.tag);
-  const markdownReady = reportStatus?.formats?.markdown === "ready";
-  const pdfReady = reportStatus?.formats?.pdf === "ready"
-    || (reportStatus?.state === "completed" && !reportStatus?.formats);
-  const reportDownloads = markdownReady || pdfReady
-    ? `<div class="notice" style="margin-bottom:1rem"><strong>Trend report</strong>
-        ${markdownReady ? `<a class="export-chip" href="/api/download/trend-md?tag=${reportTag}">Download Markdown</a>` : ""}
-        ${pdfReady ? `<a class="export-chip" href="/api/download/trend-pdf?tag=${reportTag}">Download PDF</a>` : ""}
-        ${reportStatus?.warning ? `<span>${esc(reportStatus.warning)}</span>` : ""}
-      </div>`
-    : "";
-
   const signalsSection = clusters
-    ? `<div style="margin-bottom:4px">
+    ? `<div data-signal-grid style="margin-bottom:4px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
           <span style="font-size:11px;font-weight:700;letter-spacing:.09em;color:#64748b;text-transform:uppercase">Signals to watch</span>
           <span style="font-size:11px;color:#94a3b8">${clusters.length} clusters</span>
@@ -291,6 +312,7 @@ export function dashboard() {
         <div><span class="insight-family-kicker">Model taxonomy</span><h2 id="predefined-heading">Predefined categories</h2></div>
         <p>These are fixed choices assigned by the model—not hand-verified labels and not your subreddit list.</p>
       </div>
+      ${reportCard("synthesis", "Synthesis briefing", "synthesisReportCard", "synthesisReportPreview")}
       <div class="panel-grid">
         ${chartPanel("sentiment", "Sentiment distribution")}
         ${chartPanel("flags", "Signal flags")}
@@ -308,8 +330,7 @@ export function dashboard() {
         <p>These signals are found by clustering your records. They are emerging themes—not fixed categories or subreddit lists.</p>
       </div>
       ${signalsSection}
-      ${reportDownloads}
-      ${qaView()}
+      ${reportCard("trend", "Trend report", "trendReportCard", "trendReportPreview")}
       <div class="panel-grid two" style="margin-top:0.75rem">
         <section class="panel chart-panel">
           <div class="panel-head"><h3>Velocity × Z-score quadrant</h3><small>color = confidence</small></div>

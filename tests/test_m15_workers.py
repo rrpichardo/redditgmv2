@@ -9,6 +9,7 @@ import pandas as pd
 import app
 from scripts.classify_job import run_classify_job
 from scripts.faiss_qa_job import run_faiss_qa_job
+from scripts.synthesis_pdf_job import run_synthesis_pdf_job
 from scripts.trend_briefing_job import run_trend_briefing_job
 from scripts.trend_job import run_trend_job
 from src.gm_insights import ProviderConfig, normalize_reddit_frame, save_classified
@@ -160,6 +161,75 @@ def test_trend_pdf_worker_reads_and_writes_output_root(tmp_path: Path) -> None:
         str(markdown),
         str(expected),
     ]
+
+
+def test_synthesis_pdf_worker_publishes_markdown_and_pdf_from_reports_family(
+    tmp_path: Path,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    output_root = tmp_path / "staging"
+    status_path = _status(runtime_root, "gm", "synth-pdf-1", "synthesis_pdf")
+    reports = output_root / "gm" / "reports"
+    reports.mkdir(parents=True)
+    markdown = reports / "gm_reddit_synthesis_report.md"
+    markdown.write_text("# Briefing", encoding="utf-8")
+    classified = tmp_path / "classified.csv"
+    classified.write_text("source_id\n1\n", encoding="utf-8")
+
+    def _write_pdf(_classified_path, _report_text, pdf_path, _charts_dir) -> None:
+        pdf_path.write_bytes(b"%PDF-1.4\n%%EOF")
+
+    with patch("scripts.synthesis_pdf_job.build_synthesis_pdf_artifact", side_effect=_write_pdf):
+        run_synthesis_pdf_job(
+            "gm",
+            "synth-pdf-1",
+            runtime_root,
+            classified,
+            output_root=output_root,
+        )
+
+    pdf = reports / "gm_reddit_synthesis_report.pdf"
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert pdf.read_bytes().startswith(b"%PDF")
+    assert status["state"] == "completed"
+    assert status["formats"] == {"markdown": "ready", "pdf": "ready"}
+    assert status["artifact_paths"] == [str(markdown), str(pdf)]
+
+
+def test_synthesis_pdf_worker_keeps_markdown_when_pdf_rendering_fails(
+    tmp_path: Path,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    output_root = tmp_path / "staging"
+    status_path = _status(runtime_root, "gm", "synth-pdf-warning", "synthesis_pdf")
+    reports = output_root / "gm" / "reports"
+    reports.mkdir(parents=True)
+    markdown = reports / "gm_reddit_synthesis_report.md"
+    markdown.write_text("# Briefing", encoding="utf-8")
+    pdf = reports / "gm_reddit_synthesis_report.pdf"
+    pdf.write_bytes(b"stale pdf")
+    classified = tmp_path / "classified.csv"
+    classified.write_text("source_id\n1\n", encoding="utf-8")
+
+    with patch(
+        "scripts.synthesis_pdf_job.build_synthesis_pdf_artifact",
+        side_effect=RuntimeError("font exploded"),
+    ):
+        run_synthesis_pdf_job(
+            "gm",
+            "synth-pdf-warning",
+            runtime_root,
+            classified,
+            output_root=output_root,
+        )
+
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["state"] == "completed_with_warnings"
+    assert status["formats"] == {"markdown": "ready", "pdf": "failed"}
+    assert status["artifact_paths"] == [str(markdown)]
+    assert status["failed_artifacts"] == ["pdf"]
+    assert "font exploded" in status["warning"]
+    assert not pdf.exists()
 
 
 def test_qa_worker_uses_output_root_but_keeps_status_in_runtime(tmp_path: Path) -> None:

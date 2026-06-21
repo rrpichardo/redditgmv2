@@ -4,12 +4,14 @@ from unittest.mock import patch
 
 import pandas as pd
 import pytest
+from pypdf import PdfReader
 
 import app
 from scripts.briefing_job import run_briefing_job
 from src.briefing import BriefingResult, generate_briefing, write_briefing
 from src.gm_insights import ProviderConfig, normalize_reddit_frame, save_classified
 from src.jobs import job_path, write_status
+from src.pdf_export import build_synthesis_pdf_artifact
 
 
 # Briefing is LLM-only — there is no deterministic fallback. Tests that need a report
@@ -85,6 +87,22 @@ def test_write_briefing_is_atomic(tmp_path: Path) -> None:
 
     assert output_path.read_text(encoding="utf-8") == result.report
     assert not output_path.with_suffix(".tmp").exists()
+
+
+def test_synthesis_pdf_artifact_is_parseable_and_has_multiple_pages(tmp_path: Path) -> None:
+    classified = tmp_path / "classified.csv"
+    save_classified(_classified_frame(), classified)
+    pdf = tmp_path / "reports" / "briefing.pdf"
+
+    build_synthesis_pdf_artifact(
+        classified,
+        _FAKE_REPORT,
+        pdf,
+        tmp_path / "charts",
+    )
+
+    reader = PdfReader(str(pdf))
+    assert len(reader.pages) >= 2
 
 
 def test_briefing_worker_writes_status_to_runtime_and_artifact_to_output_root(

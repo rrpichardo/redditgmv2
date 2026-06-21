@@ -5,13 +5,14 @@ import { setNotice, setBusy } from "../components.js";
 import { loadRun } from "../app.js";
 
 // Ordered list of pipeline steps (skipped steps are still shown in order).
-const STEP_ORDER = ["prepare", "classify", "briefing", "trends", "trend_pdf", "qa_index"];
+const STEP_ORDER = ["prepare", "classify", "briefing", "synthesis_pdf", "trends", "trend_pdf", "qa_index"];
 
 // Human-readable step labels.
 const STEP_LABELS = {
   prepare:    "Prepare working set",
   classify:   "Classify posts",
   briefing:   "Generate briefing",
+  synthesis_pdf: "Render synthesis PDF",
   trends:     "Cluster & trend signals",
   trend_pdf:  "Trend report PDF",
   qa_index:   "Build Q&A index",
@@ -30,6 +31,12 @@ let retryInFlight = false;
 // or when the user merely browses an already-finished run.
 const activeRunsSeen = new Set();
 const refreshedRuns = new Set();
+const openLogKeys = new Set();
+const logSessions = new Map();
+
+function logKey(runId, stepName) {
+  return `${runId}:${stepName}`;
+}
 
 const STATE_META = {
   pending: ["○", "Pending"],
@@ -93,8 +100,11 @@ function stepCardHTML(step, runId) {
   ).join("");
 
   // Log toggle button — only if the backend says log exists.
+  const expanded = openLogKeys.has(logKey(runId, name));
   const logBtn = step.log_available
-    ? `<button class="button small log-toggle-btn" data-step="${esc(name)}" data-run="${esc(runId)}" aria-label="Toggle log for ${esc(label)}">Log ▾</button>`
+    ? `<button class="button small log-toggle-btn" data-step="${esc(name)}" data-run="${esc(runId)}"
+         aria-label="Toggle log for ${esc(label)}" aria-controls="log-${esc(name)}"
+         aria-expanded="${expanded ? "true" : "false"}">Log ${expanded ? "▴" : "▾"}</button>`
     : "";
 
   // Retry button — show for terminal failure/cancel/blocked states.
@@ -117,7 +127,7 @@ function stepCardHTML(step, runId) {
         ${logBtn}
         ${retryBtn}
       </div>
-      <div class="log-panel" id="log-${esc(name)}"><pre></pre></div>
+      <div class="log-panel${expanded ? " is-open" : ""}" id="log-${esc(name)}"><pre tabindex="0"></pre></div>
     </div>`;
 }
 
@@ -229,7 +239,7 @@ async function loadStatus() {
       statusErrorVisible = false;
     }
     updateCachedRun(status);
-    renderStatus(status);
+    await renderStatus(status);
     managePoll(status);
   } catch (err) {
     statusErrorVisible = true;
@@ -238,10 +248,11 @@ async function loadStatus() {
 }
 
 // Update the steps list and cancel button visibility.
-function renderStatus(status) {
+async function renderStatus(status) {
   const stepsEl = $("#pipelineSteps");
   if (!stepsEl) return; // view unmounted
 
+  const scrollState = captureOpenLogScroll(status.run_id);
   stepsEl.innerHTML = stepsHTML(status.steps, status.run_id);
 
   // Show cancel button only while the run is active.
@@ -252,6 +263,79 @@ function renderStatus(status) {
 
   // Re-bind per-card buttons after innerHTML replacement.
   bindCardButtons(status.run_id);
+  await refreshOpenLogs(status.run_id, scrollState);
+}
+
+function captureOpenLogScroll(runId) {
+  const captured = new Map();
+  for (const key of openLogKeys) {
+    if (!key.startsWith(`${runId}:`)) continue;
+    const stepName = key.slice(runId.length + 1);
+    const pre = document.querySelector(`#log-${CSS.escape(stepName)} pre`);
+    if (!pre) continue;
+    captured.set(key, {
+      scrollTop: pre.scrollTop,
+      atBottom: pre.scrollHeight - pre.clientHeight - pre.scrollTop < 28,
+    });
+  }
+  return captured;
+}
+
+async function refreshOpenLogs(runId, scrollState = new Map()) {
+  const keys = [...openLogKeys].filter((key) => key.startsWith(`${runId}:`));
+  await Promise.all(keys.map((key) => refreshLog(key, scrollState.get(key))));
+}
+
+async function refreshLog(key, savedScroll = null) {
+  if (!openLogKeys.has(key)) return;
+  const separator = key.indexOf(":");
+  const runId = key.slice(0, separator);
+  const stepName = key.slice(separator + 1);
+  const session = logSessions.get(key) || { attemptNo: 0, offset: 0, text: "" };
+
+  try {
+    let eof = false;
+    while (!eof && openLogKeys.has(key)) {
+      const previousOffset = session.offset;
+      const params = {
+        tag: state.tag,
+        run_id: runId,
+        step: stepName,
+        offset: session.offset,
+        max_bytes: 262144,
+      };
+      if (session.attemptNo) params.attempt_no = session.attemptNo;
+      const chunk = await request(apiUrl("/api/pipeline/log/chunk", params));
+      const didReset = chunk.reset || (session.attemptNo && session.attemptNo !== chunk.attempt_no);
+      if (didReset) {
+        session.text = "";
+        session.offset = 0;
+      }
+      session.attemptNo = chunk.attempt_no;
+      session.offset = chunk.next_offset;
+      session.text += chunk.text || "";
+      eof = Boolean(chunk.eof);
+      if (!eof && session.offset <= (didReset ? 0 : previousOffset)) break;
+    }
+    logSessions.set(key, session);
+  } catch (error) {
+    if (!session.text) session.text = `Error: ${error.message}`;
+  }
+
+  const panel = document.getElementById(`log-${stepName}`);
+  const pre = panel?.querySelector("pre");
+  const button = document.querySelector(`.log-toggle-btn[data-step="${CSS.escape(stepName)}"]`);
+  if (!panel || !pre || !openLogKeys.has(key)) return;
+  const wasAtBottom = savedScroll?.atBottom ?? (pre.scrollHeight - pre.clientHeight - pre.scrollTop < 28);
+  const priorTop = savedScroll?.scrollTop ?? pre.scrollTop;
+  panel.classList.add("is-open");
+  pre.textContent = session.text;
+  if (wasAtBottom) pre.scrollTop = pre.scrollHeight;
+  else pre.scrollTop = priorTop;
+  if (button) {
+    button.textContent = "Log ▴";
+    button.setAttribute("aria-expanded", "true");
+  }
 }
 
 // ------------------------------------------------------------------
@@ -267,25 +351,25 @@ function managePoll(status) {
   if (!isTerminal) activeRunsSeen.add(status.run_id);
 
   if (isTerminal) {
-    clearPoll();
+    stopPipelinePolling();
     maybeRefreshOnComplete(status);
     return;
   }
 
   // Clear any existing poll before starting a fresh one (e.g. after switching runs).
-  clearPoll();
+  stopPipelinePolling();
 
   state.pipelinePollTimer = setInterval(async () => {
-    // Guard: stop polling if the Pipeline tab has been unmounted.
+    // Guard: stop polling if the Settings pipeline panel has been unmounted.
     if (!document.getElementById("pipelineRunSelect")) {
-      clearPoll();
+      stopPipelinePolling();
       return;
     }
     await loadStatus();
   }, 2000);
 }
 
-function clearPoll() {
+export function stopPipelinePolling() {
   if (state.pipelinePollTimer) {
     clearInterval(state.pipelinePollTimer);
     state.pipelinePollTimer = null;
@@ -321,38 +405,25 @@ function bindCardButtons(runId) {
   });
 }
 
-// Toggle a step's log panel — fetch once, then collapse/expand on subsequent clicks.
+// Toggle a step log. Open logs are refreshed during each status poll.
 async function toggleLog(stepName, runId, btn) {
   const panel = document.getElementById(`log-${stepName}`);
   if (!panel) return;
+  const key = logKey(runId, stepName);
 
-  // If already open, just collapse it.
-  if (panel.classList.contains("is-open")) {
+  if (openLogKeys.has(key)) {
+    openLogKeys.delete(key);
     panel.classList.remove("is-open");
     btn.textContent = "Log ▾";
+    btn.setAttribute("aria-expanded", "false");
     return;
   }
 
-  // Fetch the log if the pre is still empty.
-  const pre = panel.querySelector("pre");
-  if (!pre.textContent) {
-    btn.disabled = true;
-    btn.textContent = "Loading…";
-    try {
-      // Log endpoint returns text/plain — use raw fetch.
-      const res = await fetch(apiUrl("/api/pipeline/log", { tag: state.tag, run_id: runId, step: stepName }));
-      pre.textContent = res.ok ? await res.text() : `Error ${res.status}`;
-    } catch (err) {
-      pre.textContent = `Error: ${err.message}`;
-    } finally {
-      btn.disabled = false;
-      btn.textContent = "Log ▴";
-    }
-  } else {
-    btn.textContent = "Log ▴";
-  }
-
+  openLogKeys.add(key);
   panel.classList.add("is-open");
+  btn.setAttribute("aria-expanded", "true");
+  btn.textContent = "Loading…";
+  await refreshLog(key);
 }
 
 // POST /api/pipeline/retry for a single step.
@@ -379,14 +450,14 @@ async function retryStep(stepName, btn) {
       if (response.status === 409 && body.active_run_id) {
         state.pipelineRunId = body.active_run_id;
         setNotice(`A run is already active (run ${body.active_run_id}).`, "warn");
-        clearPoll();
+        stopPipelinePolling();
         await loadPipelineRuns();
         return;
       }
       throw new Error(body.detail || body.message || `Request failed with ${response.status}`);
     }
     // Re-fetch status and restart polling if needed.
-    clearPoll();
+    stopPipelinePolling();
     await loadStatus();
   } catch (err) {
     setNotice(`Retry failed: ${err.message}`, "error");
@@ -400,14 +471,14 @@ async function retryStep(stepName, btn) {
 }
 
 // ------------------------------------------------------------------
-// Event binding — called once each time the Pipeline tab renders.
+// Event binding — called whenever the Settings pipeline panel renders.
 // ------------------------------------------------------------------
 export function bindPipelineEvents() {
   // Guard: only run if the pipeline view is actually in the DOM.
   if (!document.getElementById("pipelineRunSelect")) return;
 
   // Clear any stale polling timer from a previous render cycle.
-  clearPoll();
+  stopPipelinePolling();
 
   // Load runs and auto-select the active one.
   loadPipelineRuns();
@@ -415,13 +486,13 @@ export function bindPipelineEvents() {
   // Run selector — update selection and re-fetch status.
   $("#pipelineRunSelect")?.addEventListener("change", async (e) => {
     state.pipelineRunId = e.target.value;
-    clearPoll();
+    stopPipelinePolling();
     await loadStatus();
   });
 
   // Refresh button — manual re-fetch.
   $("#pipelineRefreshBtn")?.addEventListener("click", async () => {
-    clearPoll();
+    stopPipelinePolling();
     await loadPipelineRuns();
   });
 
@@ -435,7 +506,7 @@ export function bindPipelineEvents() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tag: state.tag, run_id: state.pipelineRunId }),
       });
-      clearPoll();
+      stopPipelinePolling();
       await loadStatus();
     } catch (err) {
       setNotice(`Cancel failed: ${err.message}`, "error");

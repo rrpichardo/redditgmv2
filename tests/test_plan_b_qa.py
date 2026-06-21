@@ -156,13 +156,13 @@ def test_stale_qa_search_is_rejected_with_recovery_guidance(
     assert response.json()["detail"]["recovery_action"] == "rebuild"
 
 
-def test_qa_ui_is_on_dashboard_and_polling_stops_on_navigation() -> None:
+def test_qa_ui_is_standalone_and_polling_stops_on_navigation() -> None:
     dashboard = (ROOT / "web/js/views/dashboard.js").read_text(encoding="utf-8")
     qa = (ROOT / "web/js/views/qa.js").read_text(encoding="utf-8")
     nav = (ROOT / "web/js/nav.js").read_text(encoding="utf-8")
 
-    assert "qaView" in dashboard
-    assert dashboard.index("${signalsSection}") < dashboard.index("${qaView()}")
+    assert "qaView" not in dashboard
+    assert "qa: qaView" in nav
     for state in ("ready", "building", "missing", "failed", "stale", "blocked_no_api_key"):
         assert state in qa
     assert "stopQaPolling" in qa

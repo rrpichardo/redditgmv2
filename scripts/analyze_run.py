@@ -42,10 +42,19 @@ from src.run_store import (
 )
 
 
-STEP_ORDER = ["prepare", "classify", "briefing", "trends", "trend_pdf", "qa_index"]
+STEP_ORDER = [
+    "prepare",
+    "classify",
+    "briefing",
+    "synthesis_pdf",
+    "trends",
+    "trend_pdf",
+    "qa_index",
+]
 DEPENDENCIES = {
     "prepare": ("classify",),
     "classify": ("briefing", "trends", "qa_index"),
+    "briefing": ("synthesis_pdf",),
     "trends": ("trend_pdf",),
 }
 _SUCCESS_STATES = {"completed", "completed_with_warnings"}
@@ -53,7 +62,7 @@ _PUBLISH_FAMILIES = ("classified", "reports", "trends", "downloads", "qa")
 CLASSIFY_FAIL_ERROR_RATE = 0.5
 _FAMILY_PRODUCERS = {
     "classified": "classify",
-    "reports": "briefing",
+    "reports": "synthesis_pdf",
     "trends": "trends",
     "downloads": "trend_pdf",
     "qa": "qa_index",
@@ -416,6 +425,8 @@ class AnalysisCoordinator:
             if self.steps_to_run is not None and "prepare" not in self.steps_to_run:
                 self.prepare_result = self._load_prepare_result()
                 self._restore_staging_working_set()
+                if "synthesis_pdf" in self.steps_to_run and "briefing" not in self.steps_to_run:
+                    self._restore_briefing_markdown()
             else:
                 self.prepare_result = self._execute_prepare()
             if self.prepare_result.analyzable_rows == 0:
@@ -425,6 +436,8 @@ class AnalysisCoordinator:
                     self._record_decision("classify", "blocked", "No analyzable rows.")
                 if "briefing" in to_run:
                     self._record_decision("briefing", "blocked", "No analyzable rows.")
+                if "synthesis_pdf" in to_run:
+                    self._record_decision("synthesis_pdf", "blocked", "Briefing did not run.")
                 if "trends" in to_run:
                     self._record_decision("trends", "blocked", "No analyzable rows.")
                 if "trend_pdf" in to_run:
@@ -527,6 +540,26 @@ class AnalysisCoordinator:
         destination = self.working_classified_path
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(artifact, destination)
+
+    def _restore_briefing_markdown(self) -> None:
+        """Restore the latest successful briefing Markdown for a PDF-only retry."""
+        destination = (
+            self.staging_tag_root / "reports" / "gm_reddit_synthesis_report.md"
+        )
+        if destination.exists():
+            return
+        attempts = self.store.get_attempts(self.run_id, "briefing")
+        for attempt in reversed(attempts):
+            for artifact in attempt.get("artifacts", []):
+                source = Path(str(artifact.get("path", "")))
+                if source.name != destination.name or not source.is_file():
+                    continue
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+                return
+        raise FileNotFoundError(
+            "A successful briefing Markdown artifact is required to retry synthesis_pdf."
+        )
 
     def _load_prepare_result(self) -> PrepareResult:
         """Reconstruct a PrepareResult from the prepared classified file without re-running prepare.
@@ -649,6 +682,8 @@ class AnalysisCoordinator:
             # Only record downstream blocks for steps that are in our execution set
             if self._should_run("briefing"):
                 self._record_decision("briefing", "blocked", "Classification failed.")
+            if self._should_run("synthesis_pdf"):
+                self._record_decision("synthesis_pdf", "blocked", "Briefing did not complete.")
             if self._should_run("trends"):
                 self._record_decision("trends", "blocked", "Classification failed.")
             if self._should_run("trend_pdf"):
@@ -661,11 +696,22 @@ class AnalysisCoordinator:
             # Briefing is LLM-only (no deterministic fallback). Block cleanly without a
             # key instead of letting the child fail with an error.
             if not has_key:
-                self._record_decision(
+                briefing = self._record_decision(
                     "briefing", "blocked", f"No effective API key ({self.config.api_key_env})."
                 )
             else:
-                self._execute_step("briefing")
+                briefing = self._execute_step("briefing")
+        else:
+            existing = self.store.get_step(self.run_id, "briefing")
+            briefing = StepResult(state=existing["state"] if existing else "skipped")
+
+        if self._should_run("synthesis_pdf"):
+            if briefing.state in _SUCCESS_STATES:
+                self._execute_step("synthesis_pdf")
+            else:
+                self._record_decision(
+                    "synthesis_pdf", "blocked", "Briefing did not complete."
+                )
 
         # trends step
         if self._should_run("trends"):
@@ -855,6 +901,7 @@ class AnalysisCoordinator:
         scripts = {
             "classify": ("classify", "classify_job.py"),
             "briefing": ("briefing", "briefing_job.py"),
+            "synthesis_pdf": ("synthesis_pdf", "synthesis_pdf_job.py"),
             "trends": ("trend", "trend_job.py"),
             "trend_pdf": ("trend_briefing", "trend_briefing_job.py"),
             "qa_index": ("faiss_qa", "faiss_qa_job.py"),
@@ -869,7 +916,7 @@ class AnalysisCoordinator:
         if step in {"classify", "briefing", "trends", "qa_index"}:
             provider[2:2] = ["--base_url", self.config.base_url]
         args = list(common)
-        if step in {"classify", "briefing", "trends", "qa_index"}:
+        if step in {"classify", "briefing", "synthesis_pdf", "trends", "qa_index"}:
             args += ["--classified_path", str(self.working_classified_path)]
         if step in {"classify", "briefing", "trends", "qa_index"}:
             args += provider
@@ -997,12 +1044,9 @@ class AnalysisCoordinator:
                     raise FileNotFoundError(
                         f"successful {producer['name']} step produced no {family} family"
                     )
-                if family == "downloads" and destination.exists():
-                    shutil.copytree(source, destination, dirs_exist_ok=True)
-                else:
-                    if destination.exists():
-                        shutil.rmtree(destination)
-                    shutil.copytree(source, destination)
+                if destination.exists():
+                    shutil.rmtree(destination)
+                shutil.copytree(source, destination)
                 (destination / ".run_id").write_text(self.run_id, encoding="utf-8")
 
         os.replace(temp_root, generation_root)
