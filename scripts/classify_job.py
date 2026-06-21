@@ -156,18 +156,22 @@ def run_classify_job(
                         {"row_id": row_id, "error": _redact_error_summary(exc)}
                     )
 
-            # After each chunk: persist the DataFrame and send a heartbeat
+                # Heartbeat after EVERY row (not just per chunk) so a single slow
+                # request can't let the liveness signal go stale and get the worker
+                # killed as interrupted. This is a tiny atomic status write.
+                write_status(
+                    status_path,
+                    {
+                        "processed": processed,
+                        "errors": errors,
+                        "heartbeat_at": time.time(),
+                    },
+                )
+
+            # Persist the DataFrame and error audit once per chunk to bound disk I/O.
             save_classified(df, classified_path)
             if error_records:
                 _write_error_audit(errors_path, error_records)
-            write_status(
-                status_path,
-                {
-                    "processed": processed,
-                    "errors": errors,
-                    "heartbeat_at": time.time(),
-                },
-            )
 
         # ------------------------------------------------------------------ #
         # 4. Write final completed status                                       #
