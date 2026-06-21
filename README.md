@@ -1,5 +1,7 @@
 # redditgm v2 — GM Signal Desk
 
+**Demo:** [Google Drive video](https://drive.google.com/file/d/1TfbjPVLoxWn3EyOI2TwecMgoKOOJQX4f/view?usp=drive_link)
+
 **Turn raw Reddit chatter about General Motors vehicles into prioritized, evidence-backed product and strategy signals.**
 
 redditgm v2 is a self-contained FastAPI web app that runs one continuous workflow: collect Reddit posts and comments, classify every comment with an LLM, surface KPIs and complaint themes, detect rising/falling trends with statistical signals, answer natural-language questions grounded in the evidence, and export briefings as Markdown/PDF. Everything runs locally and writes durable artifacts under `runtime/`.
